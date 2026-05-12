@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Set
 class _RequestWaitState:
     pending_semantic_roots: Set[str] = field(default_factory=set)
     pending_embedding_roots: Set[str] = field(default_factory=set)
+    early_done_semantic_roots: Set[str] = field(default_factory=set)
+    early_done_embedding_roots: Set[str] = field(default_factory=set)
+    early_failed_semantic_roots: Dict[str, List[str]] = field(default_factory=dict)
+    early_failed_embedding_roots: Dict[str, List[str]] = field(default_factory=dict)
     semantic_processed: int = 0
     semantic_requeue_count: int = 0
     semantic_error_count: int = 0
@@ -62,6 +66,15 @@ class RequestWaitTracker:
             state = self._states.get(telemetry_id)
             if state is None:
                 return
+            if semantic_msg_id in state.early_done_semantic_roots:
+                state.early_done_semantic_roots.discard(semantic_msg_id)
+                state.semantic_processed += 1
+                return
+            early_errors = state.early_failed_semantic_roots.pop(semantic_msg_id, [])
+            if early_errors:
+                state.semantic_error_count += len(early_errors)
+                state.semantic_errors.extend(early_errors)
+                return
             state.pending_semantic_roots.add(semantic_msg_id)
 
     def register_embedding_root(self, telemetry_id: str, root_id: str) -> None:
@@ -70,6 +83,15 @@ class RequestWaitTracker:
         with self._lock:
             state = self._states.get(telemetry_id)
             if state is None:
+                return
+            if root_id in state.early_done_embedding_roots:
+                state.early_done_embedding_roots.discard(root_id)
+                state.embedding_processed += 1
+                return
+            early_errors = state.early_failed_embedding_roots.pop(root_id, [])
+            if early_errors:
+                state.embedding_error_count += len(early_errors)
+                state.embedding_errors.extend(early_errors)
                 return
             state.pending_embedding_roots.add(root_id)
 
@@ -114,6 +136,9 @@ class RequestWaitTracker:
             state = self._states.get(telemetry_id)
             if state is None:
                 return
+            if semantic_msg_id not in state.pending_semantic_roots:
+                state.early_done_semantic_roots.add(semantic_msg_id)
+                return
             state.pending_semantic_roots.discard(semantic_msg_id)
             state.semantic_processed += max(processed_delta, 0)
 
@@ -133,6 +158,12 @@ class RequestWaitTracker:
             state = self._states.get(telemetry_id)
             if state is None:
                 return
+            if semantic_msg_id not in state.pending_semantic_roots:
+                if message:
+                    state.early_failed_semantic_roots.setdefault(semantic_msg_id, []).append(
+                        message
+                    )
+                return
             state.pending_semantic_roots.discard(semantic_msg_id)
             state.semantic_error_count += 1
             if message:
@@ -150,6 +181,9 @@ class RequestWaitTracker:
             state = self._states.get(telemetry_id)
             if state is None:
                 return
+            if root_id not in state.pending_embedding_roots:
+                state.early_done_embedding_roots.add(root_id)
+                return
             state.pending_embedding_roots.discard(root_id)
             state.embedding_processed += max(processed_delta, 0)
 
@@ -159,6 +193,10 @@ class RequestWaitTracker:
         with self._lock:
             state = self._states.get(telemetry_id)
             if state is None:
+                return
+            if root_id not in state.pending_embedding_roots:
+                if message:
+                    state.early_failed_embedding_roots.setdefault(root_id, []).append(message)
                 return
             state.pending_embedding_roots.discard(root_id)
             state.embedding_error_count += 1

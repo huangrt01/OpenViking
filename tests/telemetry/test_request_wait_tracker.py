@@ -50,3 +50,73 @@ def test_request_wait_tracker_records_requeues():
         "Semantic": {"processed": 0, "requeue_count": 1, "error_count": 0, "errors": []},
         "Embedding": {"processed": 0, "requeue_count": 2, "error_count": 0, "errors": []},
     }
+
+
+def test_request_wait_tracker_supports_semantic_done_before_register():
+    tracker = RequestWaitTracker()
+    telemetry_id = "tm_semantic_done_early"
+
+    tracker.register_request(telemetry_id)
+    tracker.mark_semantic_done(telemetry_id, "semantic-1")
+    tracker.register_semantic_root(telemetry_id, "semantic-1")
+
+    assert tracker.is_complete(telemetry_id) is True
+    assert tracker.build_queue_status(telemetry_id) == {
+        "Semantic": {"processed": 1, "requeue_count": 0, "error_count": 0, "errors": []},
+        "Embedding": {"processed": 0, "requeue_count": 0, "error_count": 0, "errors": []},
+    }
+
+
+def test_request_wait_tracker_supports_semantic_failure_before_register():
+    tracker = RequestWaitTracker()
+    telemetry_id = "tm_semantic_fail_early"
+
+    tracker.register_request(telemetry_id)
+    tracker.mark_semantic_failed(telemetry_id, "semantic-1", "boom")
+    tracker.register_semantic_root(telemetry_id, "semantic-1")
+
+    assert tracker.is_complete(telemetry_id) is True
+    assert tracker.build_queue_status(telemetry_id) == {
+        "Semantic": {
+            "processed": 0,
+            "requeue_count": 0,
+            "error_count": 1,
+            "errors": [{"message": "boom"}],
+        },
+        "Embedding": {"processed": 0, "requeue_count": 0, "error_count": 0, "errors": []},
+    }
+
+
+def test_request_wait_tracker_supports_embedding_done_before_register():
+    tracker = RequestWaitTracker()
+    telemetry_id = "tm_embedding_done_early"
+
+    tracker.register_request(telemetry_id)
+    tracker.mark_embedding_done(telemetry_id, "embedding-1")
+    tracker.register_embedding_root(telemetry_id, "embedding-1")
+
+    assert tracker.is_complete(telemetry_id) is True
+    assert tracker.build_queue_status(telemetry_id) == {
+        "Semantic": {"processed": 0, "requeue_count": 0, "error_count": 0, "errors": []},
+        "Embedding": {"processed": 1, "requeue_count": 0, "error_count": 0, "errors": []},
+    }
+
+
+def test_request_wait_tracker_supports_embedding_failure_before_register():
+    tracker = RequestWaitTracker()
+    telemetry_id = "tm_embedding_fail_early"
+
+    tracker.register_request(telemetry_id)
+    tracker.mark_embedding_failed(telemetry_id, "embedding-1", "nope")
+    tracker.register_embedding_root(telemetry_id, "embedding-1")
+
+    assert tracker.is_complete(telemetry_id) is True
+    assert tracker.build_queue_status(telemetry_id) == {
+        "Semantic": {"processed": 0, "requeue_count": 0, "error_count": 0, "errors": []},
+        "Embedding": {
+            "processed": 0,
+            "requeue_count": 0,
+            "error_count": 1,
+            "errors": [{"message": "nope"}],
+        },
+    }
