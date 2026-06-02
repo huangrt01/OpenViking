@@ -18,6 +18,7 @@ from openviking.message import Message, TextPart
 from openviking.server.identity import RequestContext, Role
 from openviking.session import compressor_v2 as compressor_v2_module
 from openviking.session.compressor_v2 import SessionCompressorV2
+from openviking.session.memory.admission import AdmissionDecision
 from openviking.session.memory.dataclass import (
     MemoryField,
     MemoryFile,
@@ -889,6 +890,281 @@ class TestCompressorV2:
         assert diff["operations"]["adds"][0]["after"] == "after"
 
     @pytest.mark.asyncio
+    async def test_memory_diff_includes_admission_trace_summary(self):
+        compressor = SessionCompressorV2(vikingdb=None)
+        user = UserIdentifier.the_default_user()
+        ctx = RequestContext(user=user, role=Role.ROOT)
+        memory_uri = "viking://agent/default/memories/experiences/debug.md"
+        viking_fs = MockVikingFS()
+        await viking_fs.write_file(
+            memory_uri,
+            MemoryFileUtils.write(MemoryFile(uri=memory_uri, content="after")),
+            ctx=ctx,
+        )
+
+        result = MemoryUpdateResult()
+        result.written_uris = [memory_uri]
+        operations = ResolvedOperations(
+            upsert_operations=[
+                ResolvedOperation(
+                    memory_fields={"content": "debug login issue"},
+                    memory_type="experiences",
+                    uris=[memory_uri],
+                )
+            ],
+            delete_file_contents=[],
+            errors=[],
+        )
+        decision = AdmissionDecision(
+            action="redirect_update",
+            reason="same_experience_name",
+            confidence=1.0,
+            target_uri=memory_uri,
+            candidate_uris=[memory_uri],
+            trace={
+                "uri": "viking://agent/default/memories/experiences/new_debug.md",
+                "output_uris": [memory_uri],
+                "memory_type": "experiences",
+                "input_shape": "create",
+                "fields": [
+                    {
+                        "field": "content",
+                        "merge_op": "replace",
+                        "input_shape": "str",
+                        "wrapper_shape": None,
+                    }
+                ],
+                "action": "redirect_update",
+                "decision": "redirect_update",
+                "status": "applied",
+                "applied": True,
+                "failed": False,
+                "skipped": False,
+                "candidate_count": 1,
+                "applied_to_uri": memory_uri,
+                "redirected": True,
+            },
+        )
+
+        diff = await compressor._build_memory_diff(
+            result=result,
+            operations=operations,
+            viking_fs=viking_fs,
+            ctx=ctx,
+            archive_uri="viking://account/default/session/test/history/archive_001",
+            admission_decisions=[decision],
+        )
+
+        assert diff["summary"]["total_admission_decisions"] == 1
+        assert diff["summary"]["admission_actions"] == {"redirect_update": 1}
+        assert diff["admission_decisions"][0]["action"] == "redirect_update"
+        assert diff["admission_decisions"][0]["fields"][0]["merge_op"] == "replace"
+        assert diff["operations"]["adds"][0]["after"] == "after"
+
+    @pytest.mark.asyncio
+    async def test_extract_phase_memory_diff_records_admission_redirect(self):
+        compressor = SessionCompressorV2(vikingdb=None)
+        user = UserIdentifier.the_default_user()
+        ctx = RequestContext(user=user, role=Role.ROOT)
+        messages = [Message.create_user("test")]
+        archive_uri = "viking://session/test/history/archive_001"
+        old_uri = "viking://agent/default/memories/experiences/booking_duplicate_handling.md"
+        new_uri = "viking://agent/default/memories/experiences/duplicate_booking_handling.md"
+        old_memory = MemoryFile(
+            uri=old_uri,
+            content="## Situation\n- old\n\n## Approach\n- old\n\n## Reflect\n- old",
+            memory_type="experiences",
+            extra_fields={"experience_name": "booking_duplicate_handling"},
+        )
+        viking_fs = MockVikingFS()
+        viking_fs.agfs = object()
+        await viking_fs.write_file(old_uri, MemoryFileUtils.write(old_memory), ctx=ctx)
+
+        class DummyProvider:
+            prefetched_uris = [old_uri]
+            read_file_contents = {old_uri: old_memory}
+            _transaction_handle = None
+
+            def get_memory_schemas(self, _ctx):
+                return [
+                    MemoryTypeSchema(
+                        memory_type="experiences",
+                        fields=[
+                            MemoryField(
+                                name="content",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.REPLACE,
+                            ),
+                            MemoryField(
+                                name="experience_name",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.IMMUTABLE,
+                            ),
+                        ],
+                    )
+                ]
+
+            def _get_registry(self):
+                return {
+                    "experiences": MemoryTypeSchema(
+                        memory_type="experiences",
+                        fields=[
+                            MemoryField(
+                                name="content",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.REPLACE,
+                            ),
+                            MemoryField(
+                                name="experience_name",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.IMMUTABLE,
+                            ),
+                        ],
+                    )
+                }
+
+        class DummyExtractLoop:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self):
+                return (
+                    ResolvedOperations(
+                        upsert_operations=[
+                            ResolvedOperation(
+                                old_memory_file_content=None,
+                                memory_fields={
+                                    "content": (
+                                        "## Situation\n- new\n\n"
+                                        "## Approach\n- new\n\n"
+                                        "## Reflect\n- new"
+                                    ),
+                                    "experience_name": "duplicate_booking_handling",
+                                },
+                                memory_type="experiences",
+                                uris=[new_uri],
+                            )
+                        ],
+                        delete_file_contents=[],
+                        errors=[],
+                    ),
+                    [],
+                )
+
+        class DummyUpdater:
+            async def apply_operations(self, operations, ctx, **kwargs):
+                assert (
+                    "viking://agent/default/memories/experiences/.experience_admission.ovlock"
+                    in handle.locks
+                )
+                op = operations.upsert_operations[0]
+                assert op.uris == [old_uri]
+                assert op.old_memory_file_content is old_memory
+                assert op.memory_fields["experience_name"] == "booking_duplicate_handling"
+
+                result = MemoryUpdateResult()
+                result.written_uris = [old_uri]
+                result.apply_traces = [
+                    {
+                        "uri": old_uri,
+                        "memory_type": "experiences",
+                        "field": "content",
+                        "merge_op": "replace",
+                        "input_shape": "str",
+                        "wrapper_shape": "replace_with_base",
+                        "stale_detected": False,
+                        "rewrite_attempted": None,
+                        "status": "applied",
+                    }
+                ]
+                await viking_fs.write_file(
+                    old_uri,
+                    MemoryFileUtils.write(
+                        MemoryFile(
+                            uri=old_uri,
+                            content="## Situation\n- new\n\n## Approach\n- new\n\n## Reflect\n- new",
+                            memory_type="experiences",
+                            extra_fields={"experience_name": "booking_duplicate_handling"},
+                        )
+                    ),
+                    ctx=ctx,
+                )
+                return result
+
+        config = SimpleNamespace(
+            vlm=SimpleNamespace(get_vlm_instance=lambda: object()),
+            memory=SimpleNamespace(
+                memory_apply_exact_file_lock_enabled=True,
+                role_id_memory_isolation_enabled=False,
+                v2_lock_max_retries=1,
+                v2_lock_retry_interval_seconds=0.0,
+            ),
+        )
+        handle = SimpleNamespace(id="handle-1", locks=[])
+
+        async def acquire_exact_path_batch(handle, paths, **kwargs):
+            handle.locks.extend(paths)
+            return True
+
+        async def release_selected(handle, paths):
+            for path in paths:
+                if path in handle.locks:
+                    handle.locks.remove(path)
+
+        lock_manager = SimpleNamespace(
+            create_handle=lambda: handle,
+            acquire_exact_tree_batch=AsyncMock(return_value=True),
+            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
+            release_selected=AsyncMock(side_effect=release_selected),
+            release=AsyncMock(),
+        )
+
+        with (
+            patch("openviking.session.compressor_v2.get_viking_fs", return_value=viking_fs),
+            patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
+            patch(
+                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
+                return_value=config,
+            ),
+            patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
+            patch("openviking.storage.transaction.init_lock_manager"),
+            patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
+            patch.object(compressor, "_get_or_create_updater", return_value=DummyUpdater()),
+        ):
+            result = await compressor._run_extract_phase(
+                provider=DummyProvider(),
+                messages=messages,
+                ctx=ctx,
+                strict_extract_errors=True,
+                phase_label="experience(viking://agent/default/memories/trajectories/traj.md)",
+                archive_uri=archive_uri,
+            )
+
+        assert result[0] == [old_uri]
+        lock_manager.acquire_exact_tree_batch.assert_not_awaited()
+        lock_manager.acquire_exact_path_batch.assert_awaited_once()
+        lock_manager.release_selected.assert_not_awaited()
+        lock_manager.release.assert_awaited_once_with(handle)
+        diff_uris = [
+            uri
+            for uri, entry in viking_fs._store.items()
+            if entry.get("type") == "file" and uri.startswith(f"{archive_uri}/memory_diff_")
+        ]
+        assert len(diff_uris) == 1
+        diff = json.loads(viking_fs._store[diff_uris[0]]["content"])
+        assert diff["summary"]["total_admission_decisions"] == 1
+        assert diff["summary"]["admission_actions"] == {"redirect_update": 1}
+        assert diff["admission_decisions"][0]["uri"] == new_uri
+        assert diff["admission_decisions"][0]["output_uris"] == [old_uri]
+        assert diff["admission_decisions"][0]["applied_to_uri"] == old_uri
+        assert diff["admission_decisions"][0]["redirected"] is True
+        assert diff["admission_decisions"][0]["status"] == "applied"
+        assert diff["operations"]["adds"] == []
+        assert diff["operations"]["updates"][0]["uri"] == old_uri
+        assert diff["operations"]["updates"][0]["before"] == old_memory.content
+        assert diff["operations"]["updates"][0]["after"].startswith("## Situation\n- new")
+
+    @pytest.mark.asyncio
     async def test_extract_phase_skips_schema_lock_when_memory_apply_exact_file_lock_enabled(self):
         """File-lock rewrite mode moves synchronization from extraction to apply."""
         compressor = SessionCompressorV2(vikingdb=None)
@@ -959,9 +1235,20 @@ class TestCompressorV2:
         )
         handle = SimpleNamespace(id="handle-1", locks=[])
 
+        async def acquire_exact_path_batch(handle, paths, **kwargs):
+            handle.locks.extend(paths)
+            return True
+
+        async def release_selected(handle, paths):
+            for path in paths:
+                if path in handle.locks:
+                    handle.locks.remove(path)
+
         lock_manager = SimpleNamespace(
             create_handle=lambda: handle,
             acquire_exact_tree_batch=AsyncMock(return_value=True),
+            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
+            release_selected=AsyncMock(side_effect=release_selected),
             release=AsyncMock(side_effect=lambda _handle: events.append("release")),
         )
 
@@ -995,6 +1282,13 @@ class TestCompressorV2:
 
         assert result[0] == ["viking://agent/default/memories/experiences/debug.md"]
         lock_manager.acquire_exact_tree_batch.assert_not_awaited()
+        lock_manager.acquire_exact_path_batch.assert_awaited_once()
+        assert lock_manager.acquire_exact_path_batch.await_args.args[0] is handle
+        assert lock_manager.acquire_exact_path_batch.await_args.args[1] == [
+            "viking://agent/default/memories/experiences/.experience_admission.ovlock"
+        ]
+        lock_manager.release_selected.assert_not_awaited()
+        lock_manager.release.assert_awaited_once_with(handle)
         assert events == ["apply", "post_apply", "release"]
 
     @pytest.mark.asyncio
@@ -1062,9 +1356,21 @@ class TestCompressorV2:
             ),
         )
         handle = SimpleNamespace(id="handle-1", locks=[])
+
+        async def acquire_exact_path_batch(handle, paths, **kwargs):
+            handle.locks.extend(paths)
+            return True
+
+        async def release_selected(handle, paths):
+            for path in paths:
+                if path in handle.locks:
+                    handle.locks.remove(path)
+
         lock_manager = SimpleNamespace(
             create_handle=lambda: handle,
             acquire_exact_tree_batch=AsyncMock(return_value=True),
+            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
+            release_selected=AsyncMock(side_effect=release_selected),
             release=AsyncMock(),
         )
 
@@ -1088,6 +1394,10 @@ class TestCompressorV2:
                     strict_extract_errors=False,
                     phase_label="experience(test)",
                 )
+        lock_manager.acquire_exact_tree_batch.assert_not_awaited()
+        lock_manager.acquire_exact_path_batch.assert_awaited_once()
+        lock_manager.release_selected.assert_not_awaited()
+        lock_manager.release.assert_awaited_once_with(handle)
 
     @pytest.mark.asyncio
     async def test_append_trajectories_uses_exact_lock(self, monkeypatch):

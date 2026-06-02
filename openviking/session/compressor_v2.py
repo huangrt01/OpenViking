@@ -22,6 +22,8 @@ from openviking.core.namespace import (
 from openviking.message import Message
 from openviking.server.identity import RequestContext
 from openviking.session.memory import ExtractLoop, MemoryUpdater
+from openviking.session.memory.admission import AdmissionDecision, apply_admission_adapters
+from openviking.session.memory.agent_experience_admission import AgentExperienceAdmissionAdapter
 from openviking.session.memory.dataclass import ResolvedOperations, StoredLink
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.memory.memory_updater import (
@@ -915,6 +917,18 @@ class SessionCompressorV2:
                 f"[{phase_label}] LLM operations: ops={_op_items}, delete_uris={_delete_uris_raw}"
             )
 
+            admission_decisions: list[AdmissionDecision] = []
+            if exact_file_apply_enabled:
+                admission_decisions = await apply_admission_adapters(
+                    operations=operations,
+                    adapters=[AgentExperienceAdmissionAdapter()],
+                    registry=provider._get_registry(),
+                    provider=provider,
+                    ctx=ctx,
+                    viking_fs=viking_fs,
+                    require_lock=True,
+                )
+
             # Resolve supersedes fields (name-based Replace): find old experience URI,
             # queue for deletion, and return per-URI inheritance map so only the
             # superseding experience inherits the old source_trajectories.
@@ -978,6 +992,7 @@ class SessionCompressorV2:
                     viking_fs=viking_fs,
                     ctx=ctx,
                     archive_uri=archive_uri,
+                    admission_decisions=admission_decisions,
                 )
                 diff_uri = f"{archive_uri}/{_phase_memory_diff_filename(phase_label)}"
                 await viking_fs.write_file(
@@ -1225,6 +1240,7 @@ class SessionCompressorV2:
         viking_fs: VikingFS,
         ctx: RequestContext,
         archive_uri: str = "",
+        admission_decisions: Optional[List[AdmissionDecision]] = None,
     ) -> Dict[str, Any]:
         """Build memory_diff.json structure from operations and result.
 
@@ -1234,6 +1250,7 @@ class SessionCompressorV2:
             viking_fs: VikingFS instance for reading file contents.
             ctx: Request context.
             archive_uri: The archive URI for this extraction.
+            admission_decisions: Optional admission adapter decisions for this phase.
 
         Returns:
             Dictionary containing memory_diff structure.
@@ -1321,10 +1338,21 @@ class SessionCompressorV2:
             except Exception:
                 pass
 
+        admission_decision_records = [
+            dict(decision.trace)
+            for decision in (admission_decisions or [])
+            if getattr(decision, "trace", None)
+        ]
+        admission_actions: Dict[str, int] = {}
+        for trace in admission_decision_records:
+            action = str(trace.get("action") or "unknown")
+            admission_actions[action] = admission_actions.get(action, 0) + 1
+
         return {
             "archive_uri": archive_uri,
             "extracted_at": datetime.utcnow().isoformat() + "Z",
             "apply_trace": list(getattr(result, "apply_traces", []) or []),
+            "admission_decisions": admission_decision_records,
             "operations": {
                 "adds": adds,
                 "updates": updates,
@@ -1335,6 +1363,8 @@ class SessionCompressorV2:
                 "total_updates": len(updates),
                 "total_deletes": len(deletes),
                 "total_apply_traces": len(getattr(result, "apply_traces", []) or []),
+                "total_admission_decisions": len(admission_decision_records),
+                "admission_actions": admission_actions,
             },
         }
 
