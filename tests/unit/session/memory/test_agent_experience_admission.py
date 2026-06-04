@@ -168,6 +168,46 @@ def test_agent_experience_admission_allows_uncertain_create_with_telemetry():
     asyncio.run(run())
 
 
+def test_agent_experience_admission_dedupes_links_after_redirect():
+    async def run():
+        old_uri = "viking://agent/a/memories/experiences/booking_duplicate_handling.md"
+        new_uri = "viking://agent/a/memories/experiences/duplicate_booking_handling.md"
+        trajectory_uri = "viking://agent/a/memories/trajectories/20260602000000000000.md"
+        old_memory = _experience(old_uri, "booking_duplicate_handling")
+        op = _operation(new_uri, "duplicate_booking_handling")
+        operations = ResolvedOperations(
+            upsert_operations=[op],
+            delete_file_contents=[],
+            errors=[],
+            resolved_links=[
+                StoredLink(from_uri=old_uri, to_uri=trajectory_uri, link_type="derived_from"),
+                StoredLink(from_uri=new_uri, to_uri=trajectory_uri, link_type="derived_from"),
+            ],
+        )
+        provider = SimpleNamespace(
+            prefetched_uris=[old_uri],
+            read_file_contents={old_uri: old_memory},
+            _transaction_handle=None,
+        )
+
+        decisions = await apply_admission_adapters(
+            operations=operations,
+            adapters=[AgentExperienceAdmissionAdapter()],
+            registry={},
+            provider=provider,
+            ctx=None,
+            viking_fs=None,
+            require_lock=False,
+        )
+
+        assert decisions[0].action == "redirect_update"
+        assert [(link.from_uri, link.to_uri, link.link_type) for link in operations.resolved_links] == [
+            (old_uri, trajectory_uri, "derived_from")
+        ]
+
+    asyncio.run(run())
+
+
 def test_agent_experience_admission_refreshes_directory_candidates_under_lock():
     async def run():
         old_uri = "viking://agent/a/memories/experiences/booking_duplicate_handling.md"

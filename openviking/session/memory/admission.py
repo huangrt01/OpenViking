@@ -192,11 +192,21 @@ def _rewrite_resolved_links(
     source_uris = {uri for uri in from_uris if uri and uri != target_uri}
     if not source_uris:
         return
+    rewritten_links = []
+    seen_links: set[tuple[str, str, str, str]] = set()
     for link in operations.resolved_links or []:
         if link.from_uri in source_uris:
             link.from_uri = target_uri
         if link.to_uri in source_uris:
             link.to_uri = target_uri
+        if not link.from_uri or not link.to_uri or link.from_uri == link.to_uri:
+            continue
+        key = (link.from_uri, link.to_uri, link.link_type, link.match_text or "")
+        if key in seen_links:
+            continue
+        seen_links.add(key)
+        rewritten_links.append(link)
+    operations.resolved_links = rewritten_links
 
 
 async def _acquire_admission_scope_lock(
