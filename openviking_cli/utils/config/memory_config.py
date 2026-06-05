@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -47,6 +47,17 @@ class MemoryConfig(BaseModel):
             "a two-phase pipeline runs after user-memory extraction: Phase 1 extracts "
             "execution trajectories from the conversation; Phase 2 consolidates them "
             "into higher-level experience memories."
+        ),
+    )
+    agent_experience_failure_integration_mode: Literal[
+        "metadata_only", "prompt_guardrail"
+    ] = Field(
+        default="metadata_only",
+        description=(
+            "Experimental handling for non-success agent trajectories during experience "
+            "consolidation. 'metadata_only' preserves normal behavior; "
+            "'prompt_guardrail' adds prompt guidance so failed or partial trajectories are "
+            "treated as negative evidence instead of positive procedures."
         ),
     )
     experimental_memory_switch: bool = Field(

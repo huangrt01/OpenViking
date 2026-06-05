@@ -31,6 +31,7 @@ EXPERIENCE_MEMORY_TYPE = "experiences"
 SEARCH_TOP_K = 5
 SOURCE_TRAJ_TOP_K = 3  # only attach source_trajectories for the top-3 candidates
 MAX_SOURCE_TRAJS = 3  # max trajectories to load per experience
+_NON_SUCCESS_OUTCOMES = {"failure", "partial", "unfinished"}
 
 
 class AgentExperienceContextProvider(SessionExtractContextProvider):
@@ -41,15 +42,32 @@ class AgentExperienceContextProvider(SessionExtractContextProvider):
         messages: Any,
         trajectory_summary: str,
         trajectory_uri: str,
+        trajectory_metadata: Optional[Dict[str, Any]] = None,
+        failure_integration_mode: str = "metadata_only",
         latest_archive_overview: str = "",
     ):
         super().__init__(messages=messages, latest_archive_overview=latest_archive_overview)
         self.trajectory_summary = trajectory_summary
         self.trajectory_uri = trajectory_uri
+        self.trajectory_metadata = dict(trajectory_metadata or {})
+        self.failure_integration_mode = str(failure_integration_mode or "metadata_only")
         self.prefetched_uris: List[str] = []
 
     def instruction(self) -> str:
         output_language = self._output_language
+        outcome = str(self.trajectory_metadata.get("outcome") or "").strip().lower()
+        outcome_guidance = ""
+        if (
+            self.failure_integration_mode == "prompt_guardrail"
+            and outcome in _NON_SUCCESS_OUTCOMES
+        ):
+            outcome_guidance = f"""
+
+The new trajectory is marked with outcome={outcome!r}. Treat this as negative or incomplete evidence:
+- Do NOT turn the failed or incomplete action sequence into positive execution steps in `Approach`.
+- Put durable failure lessons only in `Reflect` as guardrails, anti-patterns, verification rules, or do-not-apply boundaries.
+- If the trajectory does not add a durable warning beyond existing experiences, skip it.
+"""
         return f"""You are a memory extraction agent. Your job is to distill experience memories from agent execution trajectories.
 
 You are given:
@@ -57,6 +75,7 @@ You are given:
 - Up to {SEARCH_TOP_K} candidate existing experiences (retrieved by relevance). Top candidates also include their source trajectories as grounding material.
 
 The source trajectories are for reference only — do NOT include or modify them in your output.
+{outcome_guidance}
 
 ## What to output
 

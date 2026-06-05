@@ -651,14 +651,22 @@ class SessionCompressorV2:
             try:
                 mf = MemoryFileUtils.read(await viking_fs.read_file(traj_uri, ctx=ctx) or "")
                 traj_content = mf.content
+                traj_metadata = mf.to_metadata()
             except Exception as e:
                 logger.warning(f"Failed to read new trajectory {traj_uri}: {e}")
                 continue
 
+            failure_integration_mode = getattr(
+                config.memory,
+                "agent_experience_failure_integration_mode",
+                "metadata_only",
+            )
             exp_provider = AgentExperienceContextProvider(
                 messages=messages,
                 trajectory_summary=traj_content,
                 trajectory_uri=traj_uri,
+                trajectory_metadata=traj_metadata,
+                failure_integration_mode=failure_integration_mode,
             )
             exp_dir = exp_provider._render_experience_dir(ctx)
 

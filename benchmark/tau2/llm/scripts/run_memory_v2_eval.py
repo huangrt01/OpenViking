@@ -38,6 +38,8 @@ FIXED_FIRST_USER_NAME = "openviking_fixed_first_user_simulator"
 TRAIN_TRANSCRIPT_OPENVIKING_TEXT = "openviking_text"
 TRAIN_TRANSCRIPT_ROLE_TOOL_BLOCKS = "role_tool_blocks"
 TRAIN_TRANSCRIPT_CUSTOM_LIKE = "custom_like"
+TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
+TRAIN_OUTCOME_LABEL_ONLY = "label_only"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
 
 
@@ -94,6 +96,40 @@ def _corpus_provenance(args: argparse.Namespace, train_results: Path) -> dict[st
             "config_file": config_file or None,
             "config_file_sha256": config_sha256,
         },
+    }
+
+
+def _server_memory_config_report(args: argparse.Namespace) -> dict[str, Any]:
+    expected = getattr(args, "expected_agent_experience_failure_integration_mode", None)
+    config_file = (
+        os.environ.get("OPENVIKING_CONFIG_FILE")
+        or os.environ.get("OPENVIKING_CLI_CONFIG_FILE")
+        or ""
+    )
+    if not expected:
+        return {"config_file": config_file or None, "checked": False}
+    if not config_file:
+        raise RuntimeError(
+            "--expected-agent-experience-failure-integration-mode requires "
+            "OPENVIKING_CONFIG_FILE or OPENVIKING_CLI_CONFIG_FILE"
+        )
+    config_path = Path(config_file)
+    if not config_path.is_file():
+        raise RuntimeError(f"OpenViking config file does not exist: {config_path}")
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    memory = config_data.get("memory") if isinstance(config_data, dict) else {}
+    if not isinstance(memory, dict):
+        memory = {}
+    actual = str(memory.get("agent_experience_failure_integration_mode") or "metadata_only")
+    if actual != expected:
+        raise RuntimeError(
+            "OpenViking server memory.agent_experience_failure_integration_mode mismatch: "
+            f"expected {expected!r}, actual {actual!r} in {config_path}"
+        )
+    return {
+        "config_file": str(config_path),
+        "checked": True,
+        "agent_experience_failure_integration_mode": actual,
     }
 
 
@@ -181,6 +217,19 @@ def _db_match(sim: dict[str, Any]) -> bool | None:
 
 def _task_success(sim: dict[str, Any]) -> bool:
     return _reward(sim) >= 1.0
+
+
+def _outcome_label(sim: dict[str, Any]) -> str:
+    return "success" if _task_success(sim) else "failure"
+
+
+def _outcome_label_message(sim: dict[str, Any]) -> str:
+    return (
+        "training_outcome:\n"
+        f"outcome_label: {_outcome_label(sim)}\n"
+        "Use this only as a coarse success/failure label for memory extraction. "
+        "No evaluator details, rewards, gold state, or task-specific fixes are provided."
+    )
 
 
 def _merge_numeric_counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
@@ -785,6 +834,12 @@ def _raise_if_invalid_effect_evidence(evidence: dict[str, Any]) -> None:
 
 def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path) -> dict[str, Any]:
     requested_commit_concurrency = int(args.corpus_session_commit_concurrency)
+    server_memory_config = _server_memory_config_report(args)
+    train_results_file = getattr(args, "train_results_file", None)
+    train_outcome_mode = getattr(args, "train_outcome_mode", TRAIN_OUTCOME_TRANSCRIPT_ONLY)
+    requested_train_results_sha256 = (
+        _file_sha256(train_results_file) if train_results_file is not None else None
+    )
     if corpus_manifest.is_file() and not args.force_train:
         manifest = json.loads(corpus_manifest.read_text())
         cached_transcript_format = str(
@@ -819,6 +874,15 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
                 f"{cached_skip_failed!r} != {bool(args.train_skip_failed_sessions)!r}; "
                 "use a distinct corpus_id or --force-train"
             )
+        cached_outcome_mode = str(
+            manifest.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY
+        )
+        if cached_outcome_mode != train_outcome_mode:
+            raise ValueError(
+                "cached corpus train_outcome_mode mismatch: "
+                f"{cached_outcome_mode!r} != {train_outcome_mode!r}; "
+                "use a distinct corpus_id or --force-train"
+            )
         cached_commit_concurrency = int(manifest.get("corpus_session_commit_concurrency") or 1)
         if cached_commit_concurrency != requested_commit_concurrency:
             raise ValueError(
@@ -835,10 +899,24 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
                     f"{cached_train_sha256!r} != {actual_train_sha256!r}; "
                     "use a distinct corpus_id or --force-train"
                 )
+        if requested_train_results_sha256 is not None:
+            cached_train_sha256 = manifest.get("train_results_sha256")
+            if cached_train_sha256 != requested_train_results_sha256:
+                raise ValueError(
+                    "cached corpus train_results_sha256 mismatch: "
+                    f"{cached_train_sha256!r} != {requested_train_results_sha256!r}; "
+                    "use a distinct corpus_id or --force-train"
+                )
         _raise_if_invalid_corpus_manifest(manifest)
         return manifest
 
-    if train_results.is_file() and not args.force_train:
+    if train_results_file is not None:
+        source = train_results_file
+        if source.resolve() != train_results.resolve():
+            shutil.copyfile(source, train_results)
+        data = json.loads(train_results.read_text())
+        assert_tau2_results_complete(data, context=f"{args.domain} shared train")
+    elif train_results.is_file() and not args.force_train:
         data = json.loads(train_results.read_text())
         assert_tau2_results_complete(data, context=f"{args.domain} cached train")
     else:
@@ -898,6 +976,12 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
                     sid,
                     role="user",
                     parts=[{"type": "text", "text": f"system:\n{system_prompt_text}"}],
+                )
+            if train_outcome_mode == TRAIN_OUTCOME_LABEL_ONLY:
+                client.add_message(
+                    sid,
+                    role="user",
+                    parts=[{"type": "text", "text": _outcome_label_message(sim)}],
                 )
             tool_calls_by_id: dict[str, dict[str, Any]] = {}
             for msg in sim.get("messages") or []:
@@ -980,6 +1064,7 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
     manifest = {
         "domain": args.domain,
         "train_results": str(train_results),
+        "train_results_source": str(train_results_file) if train_results_file else None,
         "train_results_sha256": provenance["train_results_sha256"],
         "tau2": provenance["tau2"],
         "openviking": {
@@ -987,8 +1072,13 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
             "account": args.openviking_account,
             "user": args.openviking_user,
             "search_uri": args.search_uri,
+            "expected_agent_experience_failure_integration_mode": (
+                getattr(args, "expected_agent_experience_failure_integration_mode", None)
+            ),
+            "server_memory_config": server_memory_config,
             **provenance["openviking"],
         },
+        "train_outcome_mode": train_outcome_mode,
         "train_transcript_format": args.train_transcript_format,
         "train_include_system_prompt": bool(args.train_include_system_prompt),
         "train_skip_failed_sessions": bool(args.train_skip_failed_sessions),
@@ -1313,6 +1403,14 @@ def main() -> int:
             "Defaults to 1 to preserve the serial baseline."
         ),
     )
+    parser.add_argument(
+        "--expected-agent-experience-failure-integration-mode",
+        choices=["metadata_only", "prompt_guardrail"],
+        help=(
+            "Expected server-side memory.agent_experience_failure_integration_mode. "
+            "When set, the runner validates the active OpenViking config before corpus writes."
+        ),
+    )
     parser.add_argument("--search-uri")
     parser.add_argument("--retrieval-top-k", type=int, default=4)
     parser.add_argument("--first-user-retrieval-top-k", type=int)
@@ -1337,6 +1435,23 @@ def main() -> int:
             "openviking_text preserves the compact adapter text format; role_tool_blocks "
             "uses role-prefixed messages plus tool-call/tool-response blocks. "
             "custom_like is a compatibility alias for older cached custom-like corpora."
+        ),
+    )
+    parser.add_argument(
+        "--train-outcome-mode",
+        choices=[TRAIN_OUTCOME_TRANSCRIPT_ONLY, TRAIN_OUTCOME_LABEL_ONLY],
+        default=TRAIN_OUTCOME_TRANSCRIPT_ONLY,
+        help=(
+            "Whether to replay only the train transcript or prepend a coarse "
+            "success/failure outcome label before memory extraction."
+        ),
+    )
+    parser.add_argument(
+        "--train-results-file",
+        type=Path,
+        help=(
+            "Reuse an existing TAU-2 train results JSON for corpus construction. "
+            "This keeps train simulations fixed while rebuilding OpenViking corpora."
         ),
     )
     parser.add_argument(
@@ -1428,6 +1543,10 @@ def main() -> int:
         args.scope_prompt_file = args.scope_prompt_file.expanduser().resolve()
         if not args.scope_prompt_file.is_file():
             parser.error(f"--scope-prompt-file does not exist: {args.scope_prompt_file}")
+    if args.train_results_file is not None:
+        args.train_results_file = args.train_results_file.expanduser().resolve()
+        if not args.train_results_file.is_file():
+            parser.error(f"--train-results-file does not exist: {args.train_results_file}")
     train_results = corpus_dir / "train_results.json"
     corpus_manifest = corpus_dir / "corpus_manifest.json"
     eval_results = args.run_dir / f"{args.run_label}.json"

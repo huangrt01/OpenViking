@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -29,7 +30,20 @@ from tau2_common import (
 )
 
 TRAIN_TRANSCRIPT_OPENVIKING_TEXT = "openviking_text"
+TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cell_python_executable() -> str:
+    return os.environ.get("PYTHON_BIN") or sys.executable
 
 
 def _reward(sim: dict[str, Any]) -> float:
@@ -237,6 +251,44 @@ def _train_skip_failed_sessions(strategy: dict[str, Any]) -> bool:
     return _enabled(strategy.get("train_skip_failed_sessions"))
 
 
+def _train_outcome_mode(strategy: dict[str, Any]) -> str:
+    return str(strategy.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY)
+
+
+def _train_results_file(
+    config: dict[str, Any], strategy: dict[str, Any], domain: str
+) -> Path | None:
+    raw = strategy.get("train_results_file")
+    if raw is None:
+        raw = strategy.get("train_results_files")
+    if raw is None:
+        raw = config.get("paths", {}).get("train_results_file")
+    if raw is None:
+        raw = config.get("paths", {}).get("train_results_files")
+    if isinstance(raw, dict):
+        raw = raw.get(domain) or raw.get("default")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return resolve_path(str(raw))
+
+
+def _agent_experience_failure_integration_mode(
+    config: dict[str, Any], strategy: dict[str, Any]
+) -> str | None:
+    raw = strategy.get("agent_experience_failure_integration_mode")
+    if raw is None:
+        raw = config.get("openviking", {}).get("agent_experience_failure_integration_mode")
+    if raw is None or str(raw).strip() == "":
+        return None
+    value = str(raw)
+    if value not in {"metadata_only", "prompt_guardrail"}:
+        raise ValueError(
+            "agent_experience_failure_integration_mode must be one of "
+            "metadata_only, prompt_guardrail"
+        )
+    return value
+
+
 def _manifest_openviking_identity(corpus_dir: Path) -> dict[str, str] | None:
     manifest_path = corpus_dir / "corpus_manifest.json"
     if not manifest_path.is_file():
@@ -330,7 +382,7 @@ def _tau2_command(
             search_uri = _search_uri(search_memory_type)
         budget = _retrieval_budget(config, strategy)
         command = [
-            sys.executable,
+            _cell_python_executable(),
             str(Path(__file__).with_name("run_memory_v2_eval.py")),
             "--tau2-repo",
             str(tau2_repo(config)),
@@ -413,6 +465,18 @@ def _tau2_command(
             command.append("--train-include-system-prompt")
         if _train_skip_failed_sessions(strategy):
             command.append("--train-skip-failed-sessions")
+        command.extend(["--train-outcome-mode", _train_outcome_mode(strategy)])
+        train_results_file = _train_results_file(config, strategy, domain)
+        if train_results_file is not None:
+            command.extend(["--train-results-file", str(train_results_file)])
+        failure_integration_mode = _agent_experience_failure_integration_mode(config, strategy)
+        if failure_integration_mode is not None:
+            command.extend(
+                [
+                    "--expected-agent-experience-failure-integration-mode",
+                    failure_integration_mode,
+                ]
+            )
         if fixed_first_user_file is not None:
             command.extend(["--fixed-first-user-file", str(fixed_first_user_file)])
         if scope_prompt_file is not None:
@@ -430,7 +494,7 @@ def _tau2_command(
         return None
 
     command = [
-        sys.executable,
+        _cell_python_executable(),
         str(Path(__file__).with_name("run_memory_v2_eval.py")),
         "--tau2-repo",
         str(tau2_repo(config)),
@@ -621,6 +685,15 @@ def _build_plan(
                         ),
                         "retrieval_mode": strategy.get("retrieval_mode"),
                         "train_transcript_format": _train_transcript_format(strategy),
+                        "train_outcome_mode": _train_outcome_mode(strategy),
+                        "train_results_file": (
+                            str(_train_results_file(config, strategy, domain))
+                            if _train_results_file(config, strategy, domain) is not None
+                            else None
+                        ),
+                        "agent_experience_failure_integration_mode": (
+                            _agent_experience_failure_integration_mode(config, strategy)
+                        ),
                         "train_include_system_prompt": _enabled(
                             strategy.get("train_include_system_prompt")
                         ),
@@ -754,6 +827,39 @@ def _prepare_memory_corpus(cell: dict[str, Any], repo: Path, out: Path) -> dict[
                 f"{key}: {cached_skip_failed!r} != {requested_skip_failed!r}; "
                 "use a distinct corpus_id or rebuild the corpus"
             )
+        cached_outcome_mode = str(
+            manifest.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY
+        )
+        requested_outcome_mode = str(
+            cell.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY
+        )
+        if cached_outcome_mode != requested_outcome_mode:
+            raise RuntimeError(
+                "cached corpus train_outcome_mode mismatch for "
+                f"{key}: {cached_outcome_mode!r} != {requested_outcome_mode!r}; "
+                "use a distinct corpus_id or rebuild the corpus"
+            )
+        train_results_file = cell.get("train_results_file")
+        if train_results_file:
+            requested_sha = _file_sha256(Path(train_results_file))
+            cached_sha = manifest.get("train_results_sha256")
+            if cached_sha != requested_sha:
+                raise RuntimeError(
+                    "cached corpus train_results_sha256 mismatch for "
+                    f"{key}: {cached_sha!r} != {requested_sha!r}; "
+                    "use a distinct corpus_id or rebuild the corpus"
+                )
+        requested_failure_mode = cell.get("agent_experience_failure_integration_mode")
+        if requested_failure_mode is not None:
+            cached_failure_mode = (manifest.get("openviking") or {}).get(
+                "expected_agent_experience_failure_integration_mode"
+            )
+            if cached_failure_mode != requested_failure_mode:
+                raise RuntimeError(
+                    "cached corpus agent_experience_failure_integration_mode mismatch for "
+                    f"{key}: {cached_failure_mode!r} != {requested_failure_mode!r}; "
+                    "use a distinct corpus_id or rebuild the corpus"
+                )
         cached_commit_concurrency = int(manifest.get("corpus_session_commit_concurrency") or 1)
         requested_commit_concurrency = int(cell.get("corpus_session_commit_concurrency") or 1)
         if cached_commit_concurrency != requested_commit_concurrency:

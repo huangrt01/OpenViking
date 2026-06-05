@@ -108,6 +108,27 @@ def test_corpus_provenance_records_train_config_and_git_identity(tmp_path, monke
     assert provenance["openviking"]["config_file_sha256"] == module._file_sha256(config_file)
 
 
+def test_server_memory_config_report_validates_failure_integration_mode(tmp_path, monkeypatch):
+    module = _load_runner_module()
+    config_file = tmp_path / "ov.conf"
+    config_file.write_text(
+        '{"memory":{"agent_experience_failure_integration_mode":"prompt_guardrail"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENVIKING_CONFIG_FILE", str(config_file))
+
+    report = module._server_memory_config_report(
+        SimpleNamespace(expected_agent_experience_failure_integration_mode="prompt_guardrail")
+    )
+
+    assert report["checked"] is True
+    assert report["agent_experience_failure_integration_mode"] == "prompt_guardrail"
+    with pytest.raises(RuntimeError, match="failure_integration_mode mismatch"):
+        module._server_memory_config_report(
+            SimpleNamespace(expected_agent_experience_failure_integration_mode="metadata_only")
+        )
+
+
 def test_cached_corpus_rejects_train_results_sha_mismatch(tmp_path):
     module = _load_runner_module()
     train_results = tmp_path / "train_results.json"

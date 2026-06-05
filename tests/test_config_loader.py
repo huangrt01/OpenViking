@@ -221,6 +221,32 @@ def test_openviking_config_memory_agent_memory_enabled(monkeypatch):
     OpenVikingConfigSingleton.reset_instance()
 
 
+def test_openviking_config_agent_experience_failure_integration_mode(monkeypatch):
+    monkeypatch.setenv(OPENVIKING_CONFIG_ENV, "/tmp/codex-no-config.json")
+
+    from openviking_cli.utils.config.open_viking_config import (
+        OpenVikingConfig,
+        OpenVikingConfigSingleton,
+    )
+
+    default_config = OpenVikingConfig.from_dict({})
+    guardrail_config = OpenVikingConfig.from_dict(
+        {"memory": {"agent_experience_failure_integration_mode": "prompt_guardrail"}}
+    )
+
+    assert default_config.memory.agent_experience_failure_integration_mode == "metadata_only"
+    assert (
+        guardrail_config.memory.agent_experience_failure_integration_mode
+        == "prompt_guardrail"
+    )
+    with pytest.raises(ValueError, match="agent_experience_failure_integration_mode"):
+        OpenVikingConfig.from_dict(
+            {"memory": {"agent_experience_failure_integration_mode": "reflect_only_update"}}
+        )
+
+    OpenVikingConfigSingleton.reset_instance()
+
+
 def test_openviking_config_accepts_long_term_extraction_switch(monkeypatch):
     monkeypatch.setenv(OPENVIKING_CONFIG_ENV, "/tmp/codex-no-config.json")
 

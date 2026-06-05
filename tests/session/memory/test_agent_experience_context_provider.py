@@ -30,6 +30,36 @@ def test_create_tool_context_uses_extract_context_page_id_map():
     assert tool_ctx.page_id_map is extract_context.page_id_map
 
 
+def test_instruction_adds_failure_guardrail_for_non_success_outcome():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="failed baggage update",
+        trajectory_uri="viking://user/user_sample_9/memories/trajectories/failed_baggage_update.md",
+        trajectory_metadata={"outcome": "failure"},
+        failure_integration_mode="prompt_guardrail",
+    )
+
+    instruction = provider.instruction()
+
+    assert "outcome='failure'" in instruction
+    assert "negative or incomplete evidence" in instruction
+    assert "Do NOT turn the failed or incomplete action sequence into positive execution steps" in instruction
+
+
+def test_instruction_keeps_default_metadata_mode_noop_for_failure_outcome():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="failed baggage update",
+        trajectory_uri="viking://user/user_sample_9/memories/trajectories/failed_baggage_update.md",
+        trajectory_metadata={"outcome": "failure"},
+    )
+
+    instruction = provider.instruction()
+
+    assert "negative or incomplete evidence" not in instruction
+    assert "outcome='failure'" not in instruction
+
+
 @pytest.mark.asyncio
 async def test_agent_experience_prefetch_starts_with_conversation_and_new_trajectory_read():
     provider = AgentExperienceContextProvider(
