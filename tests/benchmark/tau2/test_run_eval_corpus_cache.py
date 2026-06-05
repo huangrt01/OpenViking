@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -65,6 +66,25 @@ def test_cell_python_executable_prefers_python_bin(monkeypatch):
     monkeypatch.setenv("PYTHON_BIN", "/tmp/custom-python")
 
     assert run_eval._cell_python_executable() == "/tmp/custom-python"
+
+
+def test_tau2_subprocess_env_prioritizes_current_openviking_checkout(
+    monkeypatch,
+    tmp_path,
+):
+    run_eval = _load_run_eval()
+    tau2_repo = tmp_path / "tau2"
+    tau2_src = tau2_repo / "src"
+    tau2_src.mkdir(parents=True)
+    stale_openviking = "/tmp/stale-openviking"
+    other_path = "/tmp/other"
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([stale_openviking, other_path]))
+
+    env = run_eval._tau2_subprocess_env(tau2_repo)
+
+    entries = env["PYTHONPATH"].split(os.pathsep)
+    assert entries[:2] == [str(run_eval.REPO_ROOT), str(tau2_src)]
+    assert entries[2:] == [stale_openviking, other_path]
 
 
 def test_prepare_memory_corpus_reuses_cache_by_requested_commit_concurrency(tmp_path):

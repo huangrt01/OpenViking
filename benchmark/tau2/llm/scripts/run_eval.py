@@ -32,6 +32,7 @@ from tau2_common import (
 TRAIN_TRANSCRIPT_OPENVIKING_TEXT = "openviking_text"
 TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _file_sha256(path: Path) -> str:
@@ -774,11 +775,13 @@ def _memory_corpus_key(cell: dict[str, Any]) -> str:
 def _tau2_subprocess_env(repo: Path) -> dict[str, str]:
     env = os.environ.copy()
     src = repo / "src"
-    pythonpath_entry = str(src if src.is_dir() else repo)
+    tau2_pythonpath_entry = str(src if src.is_dir() else repo)
     existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        pythonpath_entry if not existing else f"{pythonpath_entry}{os.pathsep}{existing}"
-    )
+    entries = [str(REPO_ROOT), tau2_pythonpath_entry]
+    if existing:
+        entries.extend(part for part in existing.split(os.pathsep) if part)
+    deduped = list(dict.fromkeys(entries))
+    env["PYTHONPATH"] = os.pathsep.join(deduped)
     return env
 
 
