@@ -20,6 +20,33 @@ from openviking.storage.viking_fs import VikingFS
 
 EXPERIENCE_MEMORY_TYPE = "experiences"
 _ADMISSION_LOCK_FILENAME = ".experience_admission.ovlock"
+_COMPARATIVE_INSIGHT_MIN_CONFIDENCE = 0.55
+_COMPARATIVE_INSIGHT_MIN_SECTION_SCORE = 0.42
+_TEXT_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
 
 
 def _normalize_name(value: Any) -> str:
@@ -38,6 +65,57 @@ def _token_jaccard(left: str, right: str) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _text_tokens(value: Any) -> set[str]:
+    text = str(value or "").lower()
+    tokens = re.findall(r"[a-z0-9_]+", text)
+    return {token for token in tokens if len(token) > 2 and token not in _TEXT_STOPWORDS}
+
+
+def _jaccard(left_tokens: set[str], right_tokens: set[str]) -> float:
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _content_sections(content: Any) -> dict[str, str]:
+    text = str(content or "")
+    matches = list(re.finditer(r"^##\s+([^\n#]+?)\s*$", text, flags=re.MULTILINE))
+    if not matches:
+        return {}
+
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        heading = _normalize_name(match.group(1))
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[heading] = text[start:end].strip()
+    return sections
+
+
+def _comparative_insight_scores(left_content: Any, right_content: Any) -> dict[str, float]:
+    left_sections = _content_sections(left_content)
+    right_sections = _content_sections(right_content)
+    situation = _jaccard(
+        _text_tokens(left_sections.get("situation")),
+        _text_tokens(right_sections.get("situation")),
+    )
+    approach = _jaccard(
+        _text_tokens(left_sections.get("approach")),
+        _text_tokens(right_sections.get("approach")),
+    )
+    reflect = _jaccard(
+        _text_tokens(left_sections.get("reflect")),
+        _text_tokens(right_sections.get("reflect")),
+    )
+    confidence = (0.35 * situation) + (0.2 * approach) + (0.45 * reflect)
+    return {
+        "situation_score": round(situation, 4),
+        "approach_score": round(approach, 4),
+        "reflect_score": round(reflect, 4),
+        "comparative_insight_confidence": round(confidence, 4),
+    }
 
 
 def _uri_parent(uri: str) -> str:
@@ -72,6 +150,14 @@ def _candidate_experience_name(memory_file: MemoryFile) -> str:
 
 class AgentExperienceAdmissionAdapter(OperationAdmissionAdapter):
     """Redirect high-confidence duplicate experience creates to updates."""
+
+    def __init__(self, mode: str = "name_only") -> None:
+        if mode not in {"name_only", "comparative_insight"}:
+            raise ValueError(
+                "AgentExperienceAdmissionAdapter mode must be 'name_only' "
+                "or 'comparative_insight'"
+            )
+        self.mode = mode
 
     def supports(self, operation: ResolvedOperation, schema: Any, ctx: RequestContext) -> bool:
         if operation.memory_type != EXPERIENCE_MEMORY_TYPE:
@@ -211,6 +297,26 @@ class AgentExperienceAdmissionAdapter(OperationAdmissionAdapter):
                     candidate_uris=candidate_uris,
                     telemetry={"name_jaccard": score},
                 )
+
+        if self.mode == "comparative_insight":
+            proposed_content = operation.memory_fields.get("content")
+            for candidate in candidates:
+                scores = _comparative_insight_scores(proposed_content, candidate.content)
+                confidence = scores["comparative_insight_confidence"]
+                if (
+                    confidence >= _COMPARATIVE_INSIGHT_MIN_CONFIDENCE
+                    and scores["situation_score"] >= _COMPARATIVE_INSIGHT_MIN_SECTION_SCORE
+                    and scores["reflect_score"] >= _COMPARATIVE_INSIGHT_MIN_SECTION_SCORE
+                ):
+                    return AdmissionDecision(
+                        action="redirect_update",
+                        target_uri=candidate.uri,
+                        target_memory_file=candidate,
+                        reason="same_comparative_insight_boundary",
+                        confidence=confidence,
+                        candidate_uris=candidate_uris,
+                        telemetry=scores,
+                    )
 
         return AdmissionDecision(
             action="allow_with_telemetry" if candidates else "allow_create",

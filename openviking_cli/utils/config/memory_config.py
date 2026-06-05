@@ -50,7 +50,7 @@ class MemoryConfig(BaseModel):
         ),
     )
     agent_experience_failure_integration_mode: Literal[
-        "metadata_only", "prompt_guardrail", "failure_boundary"
+        "metadata_only", "prompt_guardrail", "failure_boundary", "comparative_insight"
     ] = Field(
         default="metadata_only",
         description=(
@@ -59,7 +59,10 @@ class MemoryConfig(BaseModel):
             "'prompt_guardrail' adds prompt guidance so failed or partial trajectories are "
             "treated as negative evidence instead of positive procedures; "
             "'failure_boundary' asks extraction to preserve the failed decision boundary "
-            "as an explicit Reflect guardrail inside the experience content."
+            "as an explicit Reflect guardrail inside the experience content; "
+            "'comparative_insight' additionally enables high-confidence section-level "
+            "admission so matching decision boundaries update an existing experience "
+            "instead of creating broad duplicate failure memories."
         ),
     )
     experimental_memory_switch: bool = Field(

@@ -236,6 +236,9 @@ def test_openviking_config_agent_experience_failure_integration_mode(monkeypatch
     boundary_config = OpenVikingConfig.from_dict(
         {"memory": {"agent_experience_failure_integration_mode": "failure_boundary"}}
     )
+    comparative_config = OpenVikingConfig.from_dict(
+        {"memory": {"agent_experience_failure_integration_mode": "comparative_insight"}}
+    )
 
     assert default_config.memory.agent_experience_failure_integration_mode == "metadata_only"
     assert (
@@ -245,6 +248,10 @@ def test_openviking_config_agent_experience_failure_integration_mode(monkeypatch
     assert (
         boundary_config.memory.agent_experience_failure_integration_mode
         == "failure_boundary"
+    )
+    assert (
+        comparative_config.memory.agent_experience_failure_integration_mode
+        == "comparative_insight"
     )
     with pytest.raises(ValueError, match="agent_experience_failure_integration_mode"):
         OpenVikingConfig.from_dict(

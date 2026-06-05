@@ -1405,7 +1405,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--expected-agent-experience-failure-integration-mode",
-        choices=["metadata_only", "prompt_guardrail", "failure_boundary"],
+        choices=[
+            "metadata_only",
+            "prompt_guardrail",
+            "failure_boundary",
+            "comparative_insight",
+        ],
         help=(
             "Expected server-side memory.agent_experience_failure_integration_mode. "
             "When set, the runner validates the active OpenViking config before corpus writes."

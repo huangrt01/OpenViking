@@ -19,19 +19,19 @@ from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.telemetry import OperationTelemetry, bind_telemetry
 
 
-def _experience(uri: str, name: str) -> MemoryFile:
+def _experience(uri: str, name: str, content: str | None = None) -> MemoryFile:
     return MemoryFile(
         uri=uri,
-        content="## Situation\n- old\n\n## Approach\n- old\n\n## Reflect\n- old",
+        content=content or "## Situation\n- old\n\n## Approach\n- old\n\n## Reflect\n- old",
         memory_type="experiences",
         extra_fields={"experience_name": name},
     )
 
 
-def _operation(uri: str, name: str, **fields) -> ResolvedOperation:
+def _operation(uri: str, name: str, content: str | None = None, **fields) -> ResolvedOperation:
     memory_fields = {
         "experience_name": name,
-        "content": "## Situation\n- new\n\n## Approach\n- new\n\n## Reflect\n- new",
+        "content": content or "## Situation\n- new\n\n## Approach\n- new\n\n## Reflect\n- new",
     }
     memory_fields.update(fields)
     return ResolvedOperation(
@@ -174,6 +174,152 @@ def test_agent_experience_admission_allows_uncertain_create_with_telemetry():
         assert decisions[0].trace["applied_to_uri"] is None
         assert decisions[0].trace["redirected"] is False
         assert decisions[0].trace["candidate_count"] == 1
+
+    asyncio.run(run())
+
+
+def test_agent_experience_admission_name_only_does_not_redirect_comparative_boundary():
+    async def run():
+        old_uri = "viking://agent/a/memories/experiences/reservation_ordering_guard.md"
+        new_uri = "viking://agent/a/memories/experiences/staged_mutation_boundary.md"
+        content = """## Situation
+- User asks for separate reservation state changes with confirmation between mutations.
+
+## Approach
+- Verify the current reservation state, perform only the confirmed first mutation, then ask before the next mutation.
+
+## Reflect
+- Do not collapse separate user-requested state changes into one combined update. Confirm each state boundary before the next tool mutation."""
+        old_memory = _experience(old_uri, "reservation_ordering_guard", content=content)
+        op = _operation(new_uri, "staged_mutation_boundary", content=content)
+        provider = SimpleNamespace(
+            prefetched_uris=[old_uri],
+            read_file_contents={old_uri: old_memory},
+            _transaction_handle=None,
+        )
+
+        decisions = await apply_admission_adapters(
+            operations=ResolvedOperations(
+                upsert_operations=[op],
+                delete_file_contents=[],
+                errors=[],
+            ),
+            adapters=[AgentExperienceAdmissionAdapter()],
+            registry={},
+            provider=provider,
+            ctx=None,
+            viking_fs=None,
+            require_lock=False,
+        )
+
+        assert decisions[0].action == "allow_with_telemetry"
+        assert op.uris == [new_uri]
+        assert op.old_memory_file_content is None
+
+    asyncio.run(run())
+
+
+def test_agent_experience_admission_comparative_insight_redirects_same_boundary():
+    async def run():
+        old_uri = "viking://agent/a/memories/experiences/reservation_ordering_guard.md"
+        new_uri = "viking://agent/a/memories/experiences/staged_mutation_boundary.md"
+        old_content = """## Situation
+- A user requests separate reservation state changes, such as cabin update before changing flights, and asks for confirmation between mutations.
+
+## Approach
+- Verify current reservation state, perform only the confirmed first mutation, then ask before the next mutation.
+
+## Reflect
+- Do not collapse separate user-requested state changes into one combined update. Confirm each state boundary before the next tool mutation."""
+        new_content = """## Situation
+- Customer asks for separate reservation state changes, including a cabin update before a flight change, with confirmation between mutations.
+
+## Approach
+- Read current reservation state, apply only the confirmed first mutation, and ask again before the next mutation.
+
+## Reflect
+- Never collapse separate user requested state changes into a combined update. Confirm every state boundary before the next tool mutation."""
+        old_memory = _experience(old_uri, "reservation_ordering_guard", content=old_content)
+        op = _operation(new_uri, "staged_mutation_boundary", content=new_content)
+        provider = SimpleNamespace(
+            prefetched_uris=[old_uri],
+            read_file_contents={old_uri: old_memory},
+            _transaction_handle=None,
+        )
+
+        decisions = await apply_admission_adapters(
+            operations=ResolvedOperations(
+                upsert_operations=[op],
+                delete_file_contents=[],
+                errors=[],
+            ),
+            adapters=[AgentExperienceAdmissionAdapter(mode="comparative_insight")],
+            registry={},
+            provider=provider,
+            ctx=None,
+            viking_fs=None,
+            require_lock=False,
+        )
+
+        assert decisions[0].action == "redirect_update"
+        assert decisions[0].reason == "same_comparative_insight_boundary"
+        assert op.uris == [old_uri]
+        assert op.old_memory_file_content is old_memory
+        assert decisions[0].trace["reason"] == "same_comparative_insight_boundary"
+        assert (
+            decisions[0].trace["adapter_telemetry"]["comparative_insight_confidence"]
+            >= 0.55
+        )
+        assert decisions[0].trace["adapter_telemetry"]["reflect_score"] >= 0.42
+
+    asyncio.run(run())
+
+
+def test_agent_experience_admission_comparative_insight_keeps_different_boundary():
+    async def run():
+        old_uri = "viking://agent/a/memories/experiences/reservation_ordering_guard.md"
+        new_uri = "viking://agent/a/memories/experiences/refund_transfer_boundary.md"
+        old_content = """## Situation
+- A user requests separate reservation state changes during a reservation modification.
+
+## Approach
+- Perform only the confirmed first mutation, then ask before the next mutation.
+
+## Reflect
+- Do not collapse separate user-requested state changes into one combined update. Confirm each state boundary before the next tool mutation."""
+        new_content = """## Situation
+- A user requests help during a reservation modification after refund eligibility is unclear.
+
+## Approach
+- Check refund and cancellation eligibility before any mutation, then transfer only when policy cannot be satisfied.
+
+## Reflect
+- Do not transfer before checking refund eligibility and cancellation policy. Avoid using modification memories as cancellation authority."""
+        old_memory = _experience(old_uri, "reservation_ordering_guard", content=old_content)
+        op = _operation(new_uri, "refund_transfer_boundary", content=new_content)
+        provider = SimpleNamespace(
+            prefetched_uris=[old_uri],
+            read_file_contents={old_uri: old_memory},
+            _transaction_handle=None,
+        )
+
+        decisions = await apply_admission_adapters(
+            operations=ResolvedOperations(
+                upsert_operations=[op],
+                delete_file_contents=[],
+                errors=[],
+            ),
+            adapters=[AgentExperienceAdmissionAdapter(mode="comparative_insight")],
+            registry={},
+            provider=provider,
+            ctx=None,
+            viking_fs=None,
+            require_lock=False,
+        )
+
+        assert decisions[0].action == "allow_with_telemetry"
+        assert op.uris == [new_uri]
+        assert op.old_memory_file_content is None
 
     asyncio.run(run())
 

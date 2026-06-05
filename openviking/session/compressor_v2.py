@@ -947,9 +947,19 @@ class SessionCompressorV2:
             )
 
             if exact_file_apply_enabled:
+                failure_integration_mode = getattr(
+                    config.memory,
+                    "agent_experience_failure_integration_mode",
+                    "metadata_only",
+                )
+                admission_mode = (
+                    "comparative_insight"
+                    if failure_integration_mode == "comparative_insight"
+                    else "name_only"
+                )
                 await apply_admission_adapters(
                     operations=operations,
-                    adapters=[AgentExperienceAdmissionAdapter()],
+                    adapters=[AgentExperienceAdmissionAdapter(mode=admission_mode)],
                     registry=provider._get_registry(),
                     provider=provider,
                     ctx=ctx,

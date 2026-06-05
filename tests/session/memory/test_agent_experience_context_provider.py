@@ -63,6 +63,23 @@ def test_instruction_adds_failure_boundary_for_non_success_outcome():
     assert "do not collapse them into one combined mutation" in instruction
 
 
+def test_instruction_adds_comparative_insight_for_non_success_outcome():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="failed staged reservation update",
+        trajectory_uri="viking://user/user_sample_9/memories/trajectories/failed_staged_update.md",
+        trajectory_metadata={"outcome": "failure"},
+        failure_integration_mode="comparative_insight",
+    )
+
+    instruction = provider.instruction()
+
+    assert "outcome='failure'" in instruction
+    assert "Extract it as a failure boundary" in instruction
+    assert "Prefer a comparative insight over a broad warning" in instruction
+    assert "same risky situation" in instruction
+
+
 def test_instruction_ignores_failure_boundary_mode_for_success_outcome():
     provider = AgentExperienceContextProvider(
         messages=[],
