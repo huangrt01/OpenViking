@@ -13,6 +13,8 @@ from openviking.session.memory.dataclass import MemoryTypeSchema
 from openviking.session.memory.utils.model import model_to_dict
 from openviking.session.memory.utils.template_utils import TemplateUtils
 
+_UNSAFE_URI_CHARS_RE = re.compile(r'[\x00-\x1f\x7f"<>]')
+
 
 def render_template(
     template: str,
@@ -39,6 +41,13 @@ def render_template(
         extract_context=extract_context,
         debug_undefined=True,
     )
+
+
+def _validate_generated_uri(uri: str) -> None:
+    if not uri:
+        raise ValueError("Generated URI is empty")
+    if _UNSAFE_URI_CHARS_RE.search(uri):
+        raise ValueError(f"Generated URI contains unsafe characters: {uri!r}")
 
 
 def generate_uri(
@@ -81,6 +90,7 @@ def generate_uri(
             raise ValueError(f"Template variable '{var}' has None value")
     # Render using unified render_template method (same as content_template)
     uri = render_template(uri_template, context, extract_context)
+    _validate_generated_uri(uri)
     return uri
 
 

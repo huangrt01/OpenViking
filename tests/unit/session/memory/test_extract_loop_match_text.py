@@ -25,6 +25,68 @@ class AttrDict(dict):
 
 class TestResolveOperations:
     @pytest.mark.asyncio
+    async def test_resolve_operations_skips_item_when_uri_resolution_fails(self):
+        schema = MemoryTypeSchema(
+            memory_type="experiences",
+            description="agent experience memory",
+            directory="viking://user/{{ user_space }}/memories/experiences",
+            filename_template="{{ experience_name }}.md",
+            fields=[
+                MemoryField(
+                    name="experience_name",
+                    field_type=FieldType.STRING,
+                    merge_op=MergeOp.IMMUTABLE,
+                ),
+                MemoryField(
+                    name="content",
+                    field_type=FieldType.STRING,
+                    merge_op=MergeOp.REPLACE,
+                ),
+            ],
+        )
+
+        context_provider = Mock()
+        context_provider.get_memory_schemas.return_value = [schema]
+        context_provider.read_file_contents = {}
+
+        isolation_handler = Mock()
+        isolation_handler.get_read_scope.return_value = None
+        isolation_handler.fill_identity_fields.side_effect = lambda item, role_scope=None: item
+        isolation_handler.calculate_memory_uris.side_effect = [
+            ValueError("Generated URI contains unsafe characters"),
+            ["viking://user/alice/memories/experiences/good_boundary.md"],
+        ]
+
+        loop = ExtractLoop(
+            vlm=Mock(model="test-model"),
+            viking_fs=Mock(),
+            context_provider=context_provider,
+            isolation_handler=isolation_handler,
+        )
+        loop._extract_context = SimpleNamespace(page_id_map=PageIdMap())
+
+        operations, _ = await loop.resolve_operations(
+            AttrDict(
+                experiences=[
+                    {
+                        "experience_name": 'payment_balance_inquiry": "## Situation\n- bad',
+                        "content": "bad",
+                    },
+                    {
+                        "experience_name": "good_boundary",
+                        "content": "good",
+                    },
+                ],
+                delete_uris=[],
+            )
+        )
+
+        assert len(operations.upsert_operations) == 1
+        operation = operations.upsert_operations[0]
+        assert operation.memory_fields["experience_name"] == "good_boundary"
+        assert operation.uris == ["viking://user/alice/memories/experiences/good_boundary.md"]
+
+    @pytest.mark.asyncio
     async def test_existing_page_id_keeps_existing_uri_and_identity_fields(self):
         schema = MemoryTypeSchema(
             memory_type="entities",

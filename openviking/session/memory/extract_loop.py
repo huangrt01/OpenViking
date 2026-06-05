@@ -456,17 +456,40 @@ The final output of the model must strictly follow the JSON Schema format shown 
                                         old_content.extra_fields[field_name]
                                     )
                     else:
+                        try:
+                            resolved_op.uris = self._isolation_handler.calculate_memory_uris(
+                                memory_type_schema=schema,
+                                operation=resolved_op,
+                                extract_context=self._extract_context,
+                            )
+                        except ValueError as exc:
+                            logger.warning(
+                                "Skipping %s memory item because URI resolution failed: %s",
+                                memory_type,
+                                exc,
+                            )
+                            continue
+                else:
+                    try:
                         resolved_op.uris = self._isolation_handler.calculate_memory_uris(
                             memory_type_schema=schema,
                             operation=resolved_op,
                             extract_context=self._extract_context,
                         )
-                else:
-                    resolved_op.uris = self._isolation_handler.calculate_memory_uris(
-                        memory_type_schema=schema,
-                        operation=resolved_op,
-                        extract_context=self._extract_context,
+                    except ValueError as exc:
+                        logger.warning(
+                            "Skipping %s memory item because URI resolution failed: %s",
+                            memory_type,
+                            exc,
+                        )
+                        continue
+
+                if not resolved_op.uris:
+                    logger.warning(
+                        "Skipping %s memory item because URI resolution returned no targets",
+                        memory_type,
                     )
+                    continue
 
                 _apply_deterministic_tool_skill_counter_deltas(
                     resolved_op=resolved_op,

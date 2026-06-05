@@ -141,6 +141,35 @@ class TestUriGeneration:
         with pytest.raises(ValueError, match="has None value"):
             generate_uri(memory_type, {"topic": None})
 
+    def test_generate_uri_rejects_unsafe_template_value(self):
+        """Template fields that would produce unsafe URI text are rejected."""
+        memory_type = MemoryTypeSchema(
+            memory_type="experiences",
+            description="Agent experience memory",
+            directory="viking://user/{{ user_space }}/memories/experiences",
+            filename_template="{{ experience_name }}.md",
+            fields=[
+                MemoryField(
+                    name="experience_name",
+                    field_type=FieldType.STRING,
+                    description="Experience name",
+                    merge_op=MergeOp.IMMUTABLE,
+                ),
+            ],
+        )
+
+        with pytest.raises(ValueError, match="unsafe characters"):
+            generate_uri(
+                memory_type,
+                {
+                    "experience_name": (
+                        'payment_balance_inquiry": "## Situation\n'
+                        "- User asks for balance totals"
+                    )
+                },
+                user_space="default",
+            )
+
     def test_validate_uri_template_valid(self):
         """Test validating a valid URI template."""
         memory_type = MemoryTypeSchema(
