@@ -50,14 +50,16 @@ class MemoryConfig(BaseModel):
         ),
     )
     agent_experience_failure_integration_mode: Literal[
-        "metadata_only", "prompt_guardrail"
+        "metadata_only", "prompt_guardrail", "failure_boundary"
     ] = Field(
         default="metadata_only",
         description=(
             "Experimental handling for non-success agent trajectories during experience "
             "consolidation. 'metadata_only' preserves normal behavior; "
             "'prompt_guardrail' adds prompt guidance so failed or partial trajectories are "
-            "treated as negative evidence instead of positive procedures."
+            "treated as negative evidence instead of positive procedures; "
+            "'failure_boundary' asks extraction to preserve the failed decision boundary "
+            "as an explicit Reflect guardrail inside the experience content."
         ),
     )
     experimental_memory_switch: bool = Field(

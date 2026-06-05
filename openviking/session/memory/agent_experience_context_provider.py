@@ -68,6 +68,19 @@ The new trajectory is marked with outcome={outcome!r}. Treat this as negative or
 - Put durable failure lessons only in `Reflect` as guardrails, anti-patterns, verification rules, or do-not-apply boundaries.
 - If the trajectory does not add a durable warning beyond existing experiences, skip it.
 """
+        elif (
+            self.failure_integration_mode == "failure_boundary"
+            and outcome in _NON_SUCCESS_OUTCOMES
+        ):
+            outcome_guidance = f"""
+
+The new trajectory is marked with outcome={outcome!r}. Extract it as a failure boundary, not as a positive success procedure:
+- Identify the exact decision point, missing precondition, collapsed operation boundary, wrong tool mutation, or unsafe transfer decision that caused the poor outcome.
+- When updating a matching existing experience, preserve its proven `Situation` and `Approach`; add the new failure boundary only in `Reflect`.
+- When creating a new experience from this trajectory alone, write only durable prevention logic: `Situation` names the risky context, `Approach` gives safe verification or recovery steps, and `Reflect` states the anti-pattern and corrected boundary.
+- Preserve explicit user-requested operation boundaries. If the user asks to see separate state changes or confirmations, do not collapse them into one combined mutation.
+- Skip the trajectory if you cannot state a reusable boundary that a future agent can apply before or during tool use.
+"""
         return f"""You are a memory extraction agent. Your job is to distill experience memories from agent execution trajectories.
 
 You are given:

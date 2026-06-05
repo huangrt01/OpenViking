@@ -281,10 +281,10 @@ def _agent_experience_failure_integration_mode(
     if raw is None or str(raw).strip() == "":
         return None
     value = str(raw)
-    if value not in {"metadata_only", "prompt_guardrail"}:
+    if value not in {"metadata_only", "prompt_guardrail", "failure_boundary"}:
         raise ValueError(
             "agent_experience_failure_integration_mode must be one of "
-            "metadata_only, prompt_guardrail"
+            "metadata_only, prompt_guardrail, failure_boundary"
         )
     return value
 

@@ -46,6 +46,38 @@ def test_instruction_adds_failure_guardrail_for_non_success_outcome():
     assert "Do NOT turn the failed or incomplete action sequence into positive execution steps" in instruction
 
 
+def test_instruction_adds_failure_boundary_for_non_success_outcome():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="failed staged reservation update",
+        trajectory_uri="viking://user/user_sample_9/memories/trajectories/failed_staged_update.md",
+        trajectory_metadata={"outcome": "partial"},
+        failure_integration_mode="failure_boundary",
+    )
+
+    instruction = provider.instruction()
+
+    assert "outcome='partial'" in instruction
+    assert "Extract it as a failure boundary" in instruction
+    assert "Preserve explicit user-requested operation boundaries" in instruction
+    assert "do not collapse them into one combined mutation" in instruction
+
+
+def test_instruction_ignores_failure_boundary_mode_for_success_outcome():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="successful reservation update",
+        trajectory_uri="viking://user/user_sample_9/memories/trajectories/successful_update.md",
+        trajectory_metadata={"outcome": "success"},
+        failure_integration_mode="failure_boundary",
+    )
+
+    instruction = provider.instruction()
+
+    assert "Extract it as a failure boundary" not in instruction
+    assert "Preserve explicit user-requested operation boundaries" not in instruction
+
+
 def test_instruction_keeps_default_metadata_mode_noop_for_failure_outcome():
     provider = AgentExperienceContextProvider(
         messages=[],

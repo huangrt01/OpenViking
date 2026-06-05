@@ -233,11 +233,18 @@ def test_openviking_config_agent_experience_failure_integration_mode(monkeypatch
     guardrail_config = OpenVikingConfig.from_dict(
         {"memory": {"agent_experience_failure_integration_mode": "prompt_guardrail"}}
     )
+    boundary_config = OpenVikingConfig.from_dict(
+        {"memory": {"agent_experience_failure_integration_mode": "failure_boundary"}}
+    )
 
     assert default_config.memory.agent_experience_failure_integration_mode == "metadata_only"
     assert (
         guardrail_config.memory.agent_experience_failure_integration_mode
         == "prompt_guardrail"
+    )
+    assert (
+        boundary_config.memory.agent_experience_failure_integration_mode
+        == "failure_boundary"
     )
     with pytest.raises(ValueError, match="agent_experience_failure_integration_mode"):
         OpenVikingConfig.from_dict(
