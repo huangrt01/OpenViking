@@ -104,6 +104,76 @@ def _memory_file_digest(memory_file: Optional[MemoryFile]) -> Optional[str]:
     ).hexdigest()
 
 
+def _telemetry_metric_suffix(value: Any) -> str:
+    if value is None or value == "":
+        return "none"
+    raw = str(value).strip().lower()
+    normalized = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch == "_") else "_" for ch in raw
+    )
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    return normalized[:80] or "none"
+
+
+def _record_apply_trace_telemetry_rows(
+    apply_traces: List[Dict[str, Any]],
+    *,
+    exact_file_lock_enabled: bool,
+) -> None:
+    if not apply_traces:
+        return
+
+    telemetry = get_current_telemetry()
+    for trace in apply_traces:
+        if not isinstance(trace, dict):
+            continue
+
+        status = _telemetry_metric_suffix(trace.get("status") or "unknown")
+        telemetry.increment("memory.apply.trace.total")
+        telemetry.increment(f"memory.apply.trace.status.{status}")
+        if exact_file_lock_enabled:
+            telemetry.increment("memory.apply.exact_file_lock.trace.total")
+            telemetry.increment(f"memory.apply.exact_file_lock.trace.status.{status}")
+
+        merge_op = _telemetry_metric_suffix(trace.get("merge_op"))
+        if merge_op != "none":
+            telemetry.increment(f"memory.apply.trace.merge_op.{merge_op}")
+
+        input_shape = _telemetry_metric_suffix(trace.get("input_shape"))
+        if input_shape != "none":
+            telemetry.increment(f"memory.apply.trace.input_shape.{input_shape}")
+
+        wrapper_shape = _telemetry_metric_suffix(trace.get("wrapper_shape"))
+        if wrapper_shape != "none":
+            telemetry.increment(f"memory.apply.trace.wrapper_shape.{wrapper_shape}")
+
+        if trace.get("base_matches_latest") is True:
+            telemetry.increment("memory.apply.trace.base_matches_latest")
+        elif trace.get("base_matches_latest") is False:
+            telemetry.increment("memory.apply.trace.base_mismatch")
+
+        if trace.get("stale_detected") is True:
+            telemetry.increment("memory.apply.trace.stale_detected")
+            if exact_file_lock_enabled:
+                telemetry.increment("memory.apply.exact_file_lock.trace.stale_detected")
+
+        rewrite_attempted = trace.get("rewrite_attempted")
+        rewrite_suffix = _telemetry_metric_suffix(rewrite_attempted)
+        if rewrite_suffix != "none":
+            telemetry.increment(f"memory.apply.trace.rewrite.{rewrite_suffix}")
+            if rewrite_attempted == "merge_op_owned":
+                telemetry.increment("memory.apply.trace.rewrite_attempted")
+                if exact_file_lock_enabled:
+                    telemetry.increment(
+                        "memory.apply.exact_file_lock.trace.rewrite_attempted"
+                    )
+
+        if trace.get("changed") is True:
+            telemetry.increment("memory.apply.trace.changed")
+        elif trace.get("changed") is False:
+            telemetry.increment("memory.apply.trace.unchanged")
+
+
 def _wrap_patch_with_read_base(
     patch_value: Any,
     *,
@@ -727,8 +797,8 @@ class MessageRange:
         result = []
         for i, msg_group in enumerate(self.elements):
             for msg in msg_group:
-                role_id = msg.role_id if msg.role_id else msg.role
-                result.append(f"[{role_id}]: {msg.content}")
+                speaker = msg.peer_id or msg.role
+                result.append(f"[{speaker}]: {msg.content}")
             # Add "..." separator between non-contiguous message groups
             if i < len(self.elements) - 1:
                 result.append("...")
@@ -1137,18 +1207,24 @@ class MemoryUpdater:
             )
             if lock_context is not None:
                 async with lock_context:
-                    apply_traces.extend(
-                        await self._apply_upsert_uri(
-                            resolved_op, uri, schema, ctx, extract_context=extract_context
-                        )
+                    uri_apply_traces = await self._apply_upsert_uri(
+                        resolved_op, uri, schema, ctx, extract_context=extract_context
                     )
+                    _record_apply_trace_telemetry_rows(
+                        uri_apply_traces,
+                        exact_file_lock_enabled=self._use_exact_file_lock(),
+                    )
+                    apply_traces.extend(uri_apply_traces)
                 continue
 
-            apply_traces.extend(
-                await self._apply_upsert_uri(
-                    resolved_op, uri, schema, ctx, extract_context=extract_context
-                )
+            uri_apply_traces = await self._apply_upsert_uri(
+                resolved_op, uri, schema, ctx, extract_context=extract_context
             )
+            _record_apply_trace_telemetry_rows(
+                uri_apply_traces,
+                exact_file_lock_enabled=self._use_exact_file_lock(),
+            )
+            apply_traces.extend(uri_apply_traces)
         return apply_traces
 
     async def _apply_upsert_uri(
@@ -1291,6 +1367,10 @@ class MemoryUpdater:
                     apply_trace["error"] = str(e)[:500]
                     if self._use_exact_file_lock():
                         get_current_telemetry().increment("memory.apply.merge_op.failed_file_lock")
+                        _record_apply_trace_telemetry_rows(
+                            [apply_trace],
+                            exact_file_lock_enabled=True,
+                        )
                         raise RuntimeError(
                             f"merge_op failed under exact file-lock mode: uri={uri}, "
                             f"field={field.name}, error={e}"
@@ -1360,7 +1440,18 @@ class MemoryUpdater:
             content_template=schema.content_template,
             extract_context=extract_context,
         )
-        await viking_fs.write_file(uri, new_full_content, ctx=ctx)
+        try:
+            await viking_fs.write_file(uri, new_full_content, ctx=ctx)
+        except Exception as exc:
+            for apply_trace in apply_traces:
+                apply_trace["status"] = "failed"
+                apply_trace["error_type"] = type(exc).__name__
+                apply_trace["error"] = str(exc)[:500]
+            _record_apply_trace_telemetry_rows(
+                apply_traces,
+                exact_file_lock_enabled=self._use_exact_file_lock(),
+            )
+            raise
         return apply_traces
 
     def _distribute_links_to_operations(self, operations: ResolvedOperations) -> None:

@@ -10,6 +10,7 @@ rewrites; memory-type-specific adapters own semantic matching.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, List, Optional
 
@@ -114,6 +115,11 @@ def _merge_op_name(value: Any) -> Optional[str]:
     if value is None:
         return None
     return getattr(value, "value", None) or str(value)
+
+
+def _metric_suffix(value: Any) -> str:
+    text = str(value or "unknown").strip().lower()
+    return "".join(ch if ch.isalnum() else "_" for ch in text).strip("_") or "unknown"
 
 
 def _schema_merge_ops(schema: Any) -> dict[str, Optional[str]]:
@@ -296,7 +302,18 @@ async def apply_admission_adapters(
                 applied_target_uri=target_uri,
             )
             decisions.append(decision)
+            status = str(decision.trace.get("status") or "unknown")
             telemetry.increment(f"memory.admission.{decision.action}")
+            telemetry.increment("memory.admission.trace.total")
+            telemetry.increment(f"memory.admission.action.{_metric_suffix(decision.action)}")
+            telemetry.increment(f"memory.admission.status.{_metric_suffix(status)}")
+            telemetry.increment(f"memory.admission.reason.{_metric_suffix(decision.reason)}")
+            telemetry.increment(
+                "memory.admission.candidates.total",
+                len(candidates),
+            )
+            if decision.trace.get("redirected"):
+                telemetry.increment("memory.admission.redirected")
             tracer.info(
                 "memory admission decision: "
                 f"memory_type={operation.memory_type} "
@@ -305,6 +322,10 @@ async def apply_admission_adapters(
                 f"confidence={decision.confidence} "
                 f"target_uri={decision.target_uri} "
                 f"candidates={decision.candidate_uris}"
+            )
+            tracer.info(
+                "memory admission trace: "
+                + json.dumps(decision.trace, ensure_ascii=False, sort_keys=True)
             )
             break
 

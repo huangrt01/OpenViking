@@ -16,6 +16,7 @@ from openviking.session.memory.dataclass import (
 )
 from openviking.session.memory.merge_op import FieldType, MergeOp
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+from openviking.telemetry import OperationTelemetry, bind_telemetry
 
 
 def _experience(uri: str, name: str) -> MemoryFile:
@@ -65,31 +66,34 @@ def test_agent_experience_admission_redirects_same_name_create_to_update():
             _transaction_handle=None,
         )
 
-        decisions = await apply_admission_adapters(
-            operations=operations,
-            adapters=[AgentExperienceAdmissionAdapter()],
-            registry={
-                "experiences": MemoryTypeSchema(
-                    memory_type="experiences",
-                    fields=[
-                        MemoryField(
-                            name="content",
-                            field_type=FieldType.STRING,
-                            merge_op=MergeOp.REPLACE,
-                        ),
-                        MemoryField(
-                            name="experience_name",
-                            field_type=FieldType.STRING,
-                            merge_op=MergeOp.IMMUTABLE,
-                        ),
-                    ],
-                )
-            },
-            provider=provider,
-            ctx=None,
-            viking_fs=None,
-            require_lock=False,
-        )
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            decisions = await apply_admission_adapters(
+                operations=operations,
+                adapters=[AgentExperienceAdmissionAdapter()],
+                registry={
+                    "experiences": MemoryTypeSchema(
+                        memory_type="experiences",
+                        fields=[
+                            MemoryField(
+                                name="content",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.REPLACE,
+                            ),
+                            MemoryField(
+                                name="experience_name",
+                                field_type=FieldType.STRING,
+                                merge_op=MergeOp.IMMUTABLE,
+                            ),
+                        ],
+                    )
+                },
+                provider=provider,
+                ctx=None,
+                viking_fs=None,
+                require_lock=False,
+            )
+        admission_summary = telemetry.finish().summary["memory"]["admission"]["trace"]
 
         assert decisions[0].action == "redirect_update"
         assert decisions[0].reason == "near_experience_name"
@@ -124,6 +128,12 @@ def test_agent_experience_admission_redirects_same_name_create_to_update():
             ("content", "replace", "str", None),
             ("experience_name", "immutable", "str", None),
         }
+        assert admission_summary["total"] == 1
+        assert admission_summary["action"] == {"redirect_update": 1}
+        assert admission_summary["status"] == {"applied": 1}
+        assert admission_summary["reason"] == {"near_experience_name": 1}
+        assert admission_summary["redirected"] == 1
+        assert admission_summary["candidates_total"] == 1
 
     asyncio.run(run())
 

@@ -8,21 +8,15 @@ Maintains the service-facing compressor interface.
 """
 
 import asyncio
-import hashlib
 import json
-import re
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from openviking.core.context import Context
-from openviking.core.namespace import (
-    to_agent_space,
-    to_user_space,
-)
 from openviking.message import Message
 from openviking.server.identity import RequestContext
 from openviking.session.memory import ExtractLoop, MemoryUpdater
-from openviking.session.memory.admission import AdmissionDecision, apply_admission_adapters
+from openviking.session.memory.admission import apply_admission_adapters
 from openviking.session.memory.agent_experience_admission import AgentExperienceAdmissionAdapter
 from openviking.session.memory.dataclass import ResolvedOperations, StoredLink
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
@@ -75,14 +69,6 @@ def _append_unique(paths: list[str], path: str) -> None:
         paths.append(path)
 
 
-def _phase_memory_diff_filename(phase_label: str) -> str:
-    label = re.sub(r"[^A-Za-z0-9._-]+", "_", phase_label).strip("_") or "phase"
-    if len(label) > 80:
-        digest = hashlib.sha1(phase_label.encode("utf-8")).hexdigest()[:12]
-        label = f"{label[:64].rstrip('_')}_{digest}"
-    return f"memory_diff_{label}.json"
-
-
 def _log_memory_lock_retry(
     *,
     retry_count: int,
@@ -111,13 +97,11 @@ def _render_memory_schema_locks(
     ctx: RequestContext,
     viking_fs: VikingFS,
     user_ids: list[str],
-    agent_ids: list[str],
+    isolation_handler: Optional[MemoryIsolationHandler] = None,
 ) -> tuple[list[str], list[str]]:
     exact_paths: list[str] = []
     tree_paths: list[str] = []
-    policy = ctx.namespace_policy
     user_ids = user_ids or ["default"]
-    agent_ids = agent_ids or ["default"]
 
     for schema in schemas:
         directory_template = getattr(schema, "directory", "") or ""
@@ -125,20 +109,26 @@ def _render_memory_schema_locks(
             continue
 
         filename_template = getattr(schema, "filename_template", "") or ""
-        for user_id in user_ids:
-            for agent_id in agent_ids:
-                template_vars = {
-                    "user_space": to_user_space(policy, user_id, agent_id),
-                    "agent_space": to_agent_space(policy, user_id, agent_id),
-                }
-                directory_uri = render_template(directory_template, template_vars)
+        if isolation_handler:
+            for directory_uri in isolation_handler.render_schema_directories(schema):
                 if _filename_has_variables(schema) or not filename_template:
                     _append_unique(tree_paths, viking_fs._uri_to_path(directory_uri, ctx))
                     continue
-
-                filename = render_template(filename_template, template_vars)
+                filename = render_template(filename_template, {}, None)
                 file_uri = f"{directory_uri.rstrip('/')}/{filename.lstrip('/')}"
                 _append_unique(exact_paths, viking_fs._uri_to_path(file_uri, ctx))
+            continue
+
+        for user_id in user_ids:
+            template_vars = {"user_space": user_id}
+            directory_uri = render_template(directory_template, template_vars)
+            if _filename_has_variables(schema) or not filename_template:
+                _append_unique(tree_paths, viking_fs._uri_to_path(directory_uri, ctx))
+                continue
+
+            filename = render_template(filename_template, template_vars)
+            file_uri = f"{directory_uri.rstrip('/')}/{filename.lstrip('/')}"
+            _append_unique(exact_paths, viking_fs._uri_to_path(file_uri, ctx))
 
     return exact_paths, tree_paths
 
@@ -159,6 +149,9 @@ def _schemas_support_exact_file_apply(
     base-aware synthesis for stale string replacements. String PATCH fields are
     exact-safe only when plain string outputs have an explicit base-aware full
     replacement interpretation, or when the extraction schema excludes them.
+    The PR-1 agent memory allowlist is intentionally string-only so future
+    schema additions cannot silently degrade exact-mode phases back to tree
+    locks.
     """
     unsupported: list[str] = []
     if not schemas:
@@ -175,29 +168,22 @@ def _schemas_support_exact_file_apply(
             except Exception:
                 merge_op = raw_merge_op
             field_name = getattr(field, "name", "unknown") or "unknown"
-            if merge_op == MergeOp.REPLACE:
-                raw_field_type = getattr(field, "field_type", None)
-                try:
-                    field_type = FieldType(raw_field_type)
-                except Exception:
-                    field_type = raw_field_type
-                if field_type == FieldType.STRING:
-                    continue
-                merge_op_label = getattr(merge_op, "value", str(merge_op))
-                field_type_label = getattr(field_type, "value", str(field_type))
+            raw_field_type = getattr(field, "field_type", None)
+            try:
+                field_type = FieldType(raw_field_type)
+            except Exception:
+                field_type = raw_field_type
+            merge_op_label = getattr(merge_op, "value", str(merge_op))
+            field_type_label = getattr(field_type, "value", str(field_type))
+            if field_type != FieldType.STRING:
                 unsupported.append(
                     f"{memory_type}.{field_name}:{merge_op_label}:{field_type_label}"
                 )
                 continue
+            if merge_op == MergeOp.REPLACE:
+                continue
             if merge_op == MergeOp.PATCH:
-                raw_field_type = getattr(field, "field_type", None)
-                try:
-                    field_type = FieldType(raw_field_type)
-                except Exception:
-                    field_type = raw_field_type
-                if field_type == FieldType.STRING and not string_patch_exact_safe:
-                    merge_op_label = getattr(merge_op, "value", str(merge_op))
-                    field_type_label = getattr(field_type, "value", str(field_type))
+                if not string_patch_exact_safe:
                     unsupported.append(
                         f"{memory_type}.{field_name}:{merge_op_label}:{field_type_label}"
                     )
@@ -323,6 +309,9 @@ class SessionCompressorV2:
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
         archive_uri: Optional[str] = None,
+        allowed_memory_types: Optional[set[str]] = None,
+        allow_self_memory: bool = True,
+        allowed_peer_ids: Optional[set[str]] = None,
     ) -> List[Context]:
         """Extract long-term memories from messages using v2 templating system.
 
@@ -337,6 +326,9 @@ class SessionCompressorV2:
             strict_extract_errors: If True, raise exceptions on extraction errors.
             latest_archive_overview: Overview of latest archive for context.
             archive_uri: Archive URI for writing memory_diff.json.
+            allowed_memory_types: Optional set of memory types this phase may update.
+            allow_self_memory: Whether operations without peer_id may write self memory.
+            allowed_peer_ids: Peer IDs that may be written by this extraction.
         """
 
         if not messages:
@@ -354,7 +346,8 @@ class SessionCompressorV2:
         from openviking.session.memory.memory_type_registry import create_default_registry
 
         registry = create_default_registry()
-        await registry.initialize_memory_files(ctx)
+        if allow_self_memory:
+            await registry.initialize_memory_files(ctx)
 
         # Initialize telemetry counters before extraction.
         telemetry = get_current_telemetry()
@@ -392,7 +385,13 @@ class SessionCompressorV2:
             extract_context = ExtractContext(messages)
 
             # Create MemoryIsolationHandler
-            isolation_handler = MemoryIsolationHandler(ctx, extract_context)
+            isolation_handler = MemoryIsolationHandler(
+                ctx,
+                extract_context,
+                allowed_memory_types=allowed_memory_types,
+                allow_self=allow_self_memory,
+                allowed_peer_ids=allowed_peer_ids,
+            )
             isolation_handler.prepare_messages()
             # 获取所有记忆 schema 目录并加锁（仅在有锁管理器时）
             orchestrator = self._get_or_create_react(
@@ -427,7 +426,7 @@ class SessionCompressorV2:
                     ctx=ctx,
                     viking_fs=viking_fs,
                     user_ids=read_scope.user_ids,
-                    agent_ids=read_scope.agent_ids,
+                    isolation_handler=isolation_handler,
                 )
                 logger.debug(
                     f"Memory schema locks: exact={exact_lock_paths}, tree={tree_lock_dirs}"
@@ -575,13 +574,23 @@ class SessionCompressorV2:
         strict_extract_errors: bool = False,
         latest_archive_overview: str = "",
         archive_uri: str = "",
+        allowed_memory_types: Optional[set[str]] = None,
+        include_session_skills: Optional[bool] = None,
     ) -> Dict[str, List[Any]]:
         """Two-phase agent-scope extraction for trajectories, experiences, and session skills."""
         config = get_openviking_config()
-        include_trajectories = bool(getattr(config.memory, "agent_memory_enabled", False))
-        include_session_skills = bool(
-            getattr(config.memory, "session_skill_extraction_enabled", False)
+        allowed_agent_types = (
+            {"trajectories", "experiences"}
+            if allowed_memory_types is None
+            else set(allowed_memory_types)
         )
+        agent_memory_enabled = config.memory.agent_memory_enabled
+        include_trajectories = agent_memory_enabled and "trajectories" in allowed_agent_types
+        include_experiences = agent_memory_enabled and "experiences" in allowed_agent_types
+        if include_session_skills is None:
+            include_session_skills = bool(
+                getattr(config.memory, "session_skill_extraction_enabled", False)
+            )
         empty_result: Dict[str, List[Any]] = {"contexts": [], "session_skills": []}
         if not (include_trajectories or include_session_skills):
             return empty_result
@@ -611,7 +620,7 @@ class SessionCompressorV2:
             ctx=ctx,
             strict_extract_errors=strict_extract_errors,
             phase_label="trajectory",
-            archive_uri=archive_uri,
+            allowed_memory_types=allowed_agent_types,
         )
         if traj_result is None:
             return empty_result
@@ -628,7 +637,7 @@ class SessionCompressorV2:
         # once per duplicate and generate near-identical experiences.
         written_trajectory_uris = list(dict.fromkeys(written_trajectory_uris))
 
-        if not include_trajectories or not written_trajectory_uris:
+        if not include_trajectories or not include_experiences or not written_trajectory_uris:
             if not written_trajectory_uris:
                 tracer.info("No trajectories extracted; skipping experience phase")
             return {
@@ -688,7 +697,7 @@ class SessionCompressorV2:
                 strict_extract_errors=strict_extract_errors,
                 phase_label=f"experience({traj_uri})",
                 post_apply=_append_sources_before_unlock,
-                archive_uri=archive_uri,
+                allowed_memory_types=allowed_agent_types,
             )
             if exp_result is None:
                 fallback_uris = await self._single_existing_experience_uris(
@@ -785,7 +794,7 @@ class SessionCompressorV2:
         strict_extract_errors: bool,
         phase_label: str,
         post_apply: Optional[ExtractPostApply] = None,
-        archive_uri: str = "",
+        allowed_memory_types: Optional[set[str]] = None,
     ):
         """Run one ExtractLoop phase with its own lock scope, then apply operations.
 
@@ -803,9 +812,13 @@ class SessionCompressorV2:
         viking_fs = get_viking_fs()
 
         # Build isolation_handler BEFORE creating the orchestrator so that
-        # ExtractLoop.resolve_operations() can call fill_role_ids() correctly.
+        # ExtractLoop.resolve_operations() can fill identity fields correctly.
         extract_context = ExtractContext(messages)
-        isolation_handler = MemoryIsolationHandler(ctx, extract_context)
+        isolation_handler = MemoryIsolationHandler(
+            ctx,
+            extract_context,
+            allowed_memory_types=allowed_memory_types,
+        )
         isolation_handler.prepare_messages()
 
         # Inject context into provider (mirrors extract_long_term_memories pattern)
@@ -841,6 +854,15 @@ class SessionCompressorV2:
                         string_patch_exact_safe=exact_config_enabled,
                     )
                 )
+                if exact_config_enabled and not exact_apply_supported:
+                    get_current_telemetry().increment(
+                        "memory.extract.exact_apply_schema_unsupported"
+                    )
+                    raise RuntimeError(
+                        f"[{phase_label}] exact file apply requested but schemas are "
+                        "not exact-safe; refusing tree-lock fallback: "
+                        f"{unsupported_exact_apply_fields}"
+                    )
                 exact_file_apply_enabled = exact_config_enabled and exact_apply_supported
                 orchestrator.structured_string_patches_only = exact_file_apply_enabled
             if lock_manager and exact_file_apply_enabled:
@@ -862,13 +884,12 @@ class SessionCompressorV2:
                         f"{unsupported_exact_apply_fields}"
                     )
                 user_ids = [ctx.user.user_id] if ctx and ctx.user else ["default"]
-                agent_ids = [ctx.user.agent_id] if ctx and ctx.user else ["default"]
                 exact_lock_paths, tree_lock_dirs = _render_memory_schema_locks(
                     schemas=schemas,
                     ctx=ctx,
                     viking_fs=viking_fs,
                     user_ids=user_ids,
-                    agent_ids=agent_ids,
+                    isolation_handler=isolation_handler,
                 )
 
                 retry_interval = config.memory.v2_lock_retry_interval_seconds
@@ -917,9 +938,8 @@ class SessionCompressorV2:
                 f"[{phase_label}] LLM operations: ops={_op_items}, delete_uris={_delete_uris_raw}"
             )
 
-            admission_decisions: list[AdmissionDecision] = []
             if exact_file_apply_enabled:
-                admission_decisions = await apply_admission_adapters(
+                await apply_admission_adapters(
                     operations=operations,
                     adapters=[AgentExperienceAdmissionAdapter()],
                     registry=provider._get_registry(),
@@ -977,31 +997,6 @@ class SessionCompressorV2:
                     exact_file_apply_enabled,
                 )
 
-            if (
-                archive_uri
-                and viking_fs
-                and (
-                    memory_operations.upsert_operations
-                    or memory_operations.delete_file_contents
-                    or memory_operations.errors
-                )
-            ):
-                memory_diff = await self._build_memory_diff(
-                    result=memory_result,
-                    operations=memory_operations,
-                    viking_fs=viking_fs,
-                    ctx=ctx,
-                    archive_uri=archive_uri,
-                    admission_decisions=admission_decisions,
-                )
-                diff_uri = f"{archive_uri}/{_phase_memory_diff_filename(phase_label)}"
-                await viking_fs.write_file(
-                    uri=diff_uri,
-                    content=json.dumps(memory_diff, ensure_ascii=False, indent=4),
-                    ctx=ctx,
-                )
-                logger.info("[%s] Wrote memory diff to %s", phase_label, diff_uri)
-
             skill_results: List[Dict[str, Any]] = []
             if skill_operations.upsert_operations:
                 if not self.skill_processor:
@@ -1042,7 +1037,7 @@ class SessionCompressorV2:
             )
         except Exception as e:
             logger.error(f"[{phase_label}] Failed to extract: {e}", exc_info=True)
-            if strict_extract_errors or exact_file_apply_enabled:
+            if strict_extract_errors or exact_config_enabled or exact_file_apply_enabled:
                 raise
             return None
         finally:
@@ -1240,7 +1235,6 @@ class SessionCompressorV2:
         viking_fs: VikingFS,
         ctx: RequestContext,
         archive_uri: str = "",
-        admission_decisions: Optional[List[AdmissionDecision]] = None,
     ) -> Dict[str, Any]:
         """Build memory_diff.json structure from operations and result.
 
@@ -1250,8 +1244,6 @@ class SessionCompressorV2:
             viking_fs: VikingFS instance for reading file contents.
             ctx: Request context.
             archive_uri: The archive URI for this extraction.
-            admission_decisions: Optional admission adapter decisions for this phase.
-
         Returns:
             Dictionary containing memory_diff structure.
         """
@@ -1338,21 +1330,9 @@ class SessionCompressorV2:
             except Exception:
                 pass
 
-        admission_decision_records = [
-            dict(decision.trace)
-            for decision in (admission_decisions or [])
-            if getattr(decision, "trace", None)
-        ]
-        admission_actions: Dict[str, int] = {}
-        for trace in admission_decision_records:
-            action = str(trace.get("action") or "unknown")
-            admission_actions[action] = admission_actions.get(action, 0) + 1
-
         return {
             "archive_uri": archive_uri,
             "extracted_at": datetime.utcnow().isoformat() + "Z",
-            "apply_trace": list(getattr(result, "apply_traces", []) or []),
-            "admission_decisions": admission_decision_records,
             "operations": {
                 "adds": adds,
                 "updates": updates,
@@ -1362,9 +1342,6 @@ class SessionCompressorV2:
                 "total_adds": len(adds),
                 "total_updates": len(updates),
                 "total_deletes": len(deletes),
-                "total_apply_traces": len(getattr(result, "apply_traces", []) or []),
-                "total_admission_decisions": len(admission_decision_records),
-                "admission_actions": admission_actions,
             },
         }
 

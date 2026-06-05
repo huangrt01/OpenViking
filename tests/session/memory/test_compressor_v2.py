@@ -6,7 +6,6 @@ Test for SessionCompressorV2.
 Uses MockVikingFS and real VLM (from config).
 """
 
-import json
 import logging
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -18,7 +17,6 @@ from openviking.message import Message, TextPart
 from openviking.server.identity import RequestContext, Role
 from openviking.session import compressor_v2 as compressor_v2_module
 from openviking.session.compressor_v2 import SessionCompressorV2
-from openviking.session.memory.admission import AdmissionDecision
 from openviking.session.memory.dataclass import (
     MemoryField,
     MemoryFile,
@@ -58,7 +56,7 @@ class MockVikingFS:
 
     def _get_parent_uri(self, uri: str) -> str:
         """Get parent directory URI."""
-        # Handle URIs like "viking://agent/default/memories/cards/file.md"
+        # Handle URIs like "viking://user/default/memories/cards/file.md"
         parts = uri.split("/")
         if len(parts) <= 3:
             return uri  # Root or protocol level
@@ -277,7 +275,7 @@ def create_test_conversation() -> List[Message]:
         role="user",
         parts=[
             TextPart(
-                "Cards are stored in viking://agent/{agent_space}/memories/cards, each card has name and content fields. "
+                "Cards are stored in viking://user/{user_space}/memories/cards, each card has name and content fields. "
                 "Events are stored in viking://user/{user_space}/memories/events, each event has event_name, event_time, and content fields."
             )
         ],
@@ -318,7 +316,7 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("Current task")]
+        messages = [Message(id="msg-current-task", role="user", parts=[TextPart("Current task")])]
 
         class DummyOrchestrator:
             registry = object()
@@ -461,7 +459,7 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
 
         dummy_registry = SimpleNamespace(initialize_memory_files=AsyncMock())
         dummy_orchestrator = SimpleNamespace(
@@ -493,12 +491,48 @@ class TestCompressorV2:
         debug_mock.assert_any_call("AGFS unavailable, running memory extraction without locks")
 
     @pytest.mark.asyncio
+    async def test_extract_long_term_memories_skips_self_init_when_self_disabled(self):
+        compressor = SessionCompressorV2(vikingdb=None)
+        user = UserIdentifier.the_default_user()
+        ctx = RequestContext(user=user, role=Role.ROOT)
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
+
+        dummy_registry = SimpleNamespace(initialize_memory_files=AsyncMock())
+        dummy_orchestrator = SimpleNamespace(
+            context_provider=SimpleNamespace(get_memory_schemas=lambda _ctx: []),
+            _transaction_handle=None,
+            run=AsyncMock(return_value=(None, [])),
+        )
+
+        with (
+            patch("openviking.storage.viking_fs.get_viking_fs", return_value=None),
+            patch("openviking.storage.transaction.init_lock_manager"),
+            patch("openviking.storage.transaction.get_lock_manager", return_value=None),
+            patch(
+                "openviking.session.memory.memory_type_registry.create_default_registry",
+                return_value=dummy_registry,
+            ),
+            patch.object(compressor, "_get_or_create_react", return_value=dummy_orchestrator),
+        ):
+            result = await compressor.extract_long_term_memories(
+                messages=messages,
+                ctx=ctx,
+                strict_extract_errors=False,
+                allow_self_memory=False,
+                allowed_peer_ids={"main"},
+                allowed_memory_types={"profile"},
+            )
+
+        assert result == []
+        dummy_registry.initialize_memory_files.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_v2_lock_acquire_waits_without_retry_loop(self):
         """v2 memory extraction should delegate waiting to lock manager without local retries."""
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
 
         class FixedSchema:
             directory = "viking://user/{{ user_space }}/memories"
@@ -576,7 +610,7 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
 
         schemas = [
             MemoryTypeSchema(
@@ -634,9 +668,15 @@ class TestCompressorV2:
             ),
         )
         handle = SimpleNamespace(id="handle-1", locks=[])
+
+        async def acquire_exact_path_batch(handle, paths, **kwargs):
+            handle.locks.extend(paths)
+            return True
+
         lock_manager = SimpleNamespace(
             create_handle=lambda: handle,
             acquire_exact_tree_batch=AsyncMock(return_value=True),
+            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
             release=AsyncMock(),
         )
         dummy_orchestrator = DummyOrchestrator()
@@ -650,10 +690,6 @@ class TestCompressorV2:
             patch("openviking.session.compressor_v2.get_viking_fs", return_value=FakeVikingFS()),
             patch("openviking.storage.viking_fs.get_viking_fs", return_value=FakeVikingFS()),
             patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
             patch("openviking.storage.transaction.init_lock_manager"),
             patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
             patch(
@@ -683,7 +719,7 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
         events: List[str] = []
 
         class FakeVikingFS:
@@ -721,7 +757,7 @@ class TestCompressorV2:
                             ResolvedOperation(
                                 memory_fields={"content": "debug login issue"},
                                 memory_type="experiences",
-                                uris=["viking://agent/default/memories/experiences/debug.md"],
+                                uris=["viking://user/default/memories/experiences/debug.md"],
                             )
                         ],
                         delete_file_contents=[],
@@ -734,13 +770,12 @@ class TestCompressorV2:
             async def apply_operations(self, operations, ctx, **kwargs):
                 events.append("apply")
                 result = MemoryUpdateResult()
-                result.written_uris = ["viking://agent/default/memories/experiences/debug.md"]
+                result.written_uris = ["viking://user/default/memories/experiences/debug.md"]
                 return result
 
         config = SimpleNamespace(
             vlm=SimpleNamespace(get_vlm_instance=lambda: object()),
             memory=SimpleNamespace(
-                role_id_memory_isolation_enabled=False,
                 v2_lock_max_retries=1,
                 v2_lock_retry_interval_seconds=0.0,
             ),
@@ -761,7 +796,7 @@ class TestCompressorV2:
         )
 
         async def post_apply(result, inheritance_map, lock_handle, exact_file_lock_enabled):
-            assert result.written_uris == ["viking://agent/default/memories/experiences/debug.md"]
+            assert result.written_uris == ["viking://user/default/memories/experiences/debug.md"]
             assert inheritance_map == {}
             assert lock_handle is handle
             assert exact_file_lock_enabled is False
@@ -770,10 +805,6 @@ class TestCompressorV2:
         with (
             patch("openviking.session.compressor_v2.get_viking_fs", return_value=FakeVikingFS()),
             patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
             patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
             patch("openviking.storage.transaction.init_lock_manager"),
             patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
@@ -788,381 +819,8 @@ class TestCompressorV2:
                 post_apply=post_apply,
             )
 
-        assert result[0] == ["viking://agent/default/memories/experiences/debug.md"]
+        assert result[0] == ["viking://user/default/memories/experiences/debug.md"]
         assert events == ["acquire", "apply", "post_apply", "release"]
-
-    @pytest.mark.asyncio
-    async def test_extract_phase_writes_phase_memory_diff_with_apply_trace(self):
-        compressor = SessionCompressorV2(vikingdb=None)
-        user = UserIdentifier.the_default_user()
-        ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
-        memory_uri = "viking://agent/default/memories/experiences/debug.md"
-        archive_uri = "viking://account/default/session/test/history/archive_001"
-        viking_fs = MockVikingFS()
-
-        class DummyProvider:
-            def get_memory_schemas(self, _ctx):
-                return []
-
-            def _get_registry(self):
-                return object()
-
-        class DummyExtractLoop:
-            def __init__(self, **kwargs):
-                pass
-
-            async def run(self):
-                return (
-                    ResolvedOperations(
-                        upsert_operations=[
-                            ResolvedOperation(
-                                memory_fields={"content": "debug login issue"},
-                                memory_type="experiences",
-                                uris=[memory_uri],
-                            )
-                        ],
-                        delete_file_contents=[],
-                        errors=[],
-                    ),
-                    [],
-                )
-
-        class DummyUpdater:
-            async def apply_operations(self, operations, ctx, **kwargs):
-                result = MemoryUpdateResult()
-                result.written_uris = [memory_uri]
-                result.apply_traces = [
-                    {
-                        "uri": memory_uri,
-                        "memory_type": "experiences",
-                        "field": "content",
-                        "merge_op": "replace",
-                        "input_shape": "str",
-                        "wrapper_shape": "replace_with_base",
-                        "stale_detected": False,
-                        "rewrite_attempted": None,
-                        "status": "applied",
-                    }
-                ]
-                await viking_fs.write_file(
-                    memory_uri,
-                    MemoryFileUtils.write(MemoryFile(uri=memory_uri, content="after")),
-                    ctx=ctx,
-                )
-                return result
-
-        config = SimpleNamespace(
-            vlm=SimpleNamespace(get_vlm_instance=lambda: object()),
-            memory=SimpleNamespace(role_id_memory_isolation_enabled=False),
-        )
-
-        with (
-            patch("openviking.session.compressor_v2.get_viking_fs", return_value=viking_fs),
-            patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
-            patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
-            patch.object(compressor, "_get_or_create_updater", return_value=DummyUpdater()),
-        ):
-            result = await compressor._run_extract_phase(
-                provider=DummyProvider(),
-                messages=messages,
-                ctx=ctx,
-                strict_extract_errors=True,
-                phase_label="experience(viking://agent/default/memories/trajectories/traj.md)",
-                archive_uri=archive_uri,
-            )
-
-        assert result[0] == [memory_uri]
-        diff_uris = [
-            uri
-            for uri, entry in viking_fs._store.items()
-            if entry.get("type") == "file" and uri.startswith(f"{archive_uri}/memory_diff_")
-        ]
-        assert len(diff_uris) == 1
-        assert "/" not in diff_uris[0].removeprefix(f"{archive_uri}/memory_diff_")
-        diff = json.loads(viking_fs._store[diff_uris[0]]["content"])
-        assert diff["summary"]["total_apply_traces"] == 1
-        assert diff["apply_trace"][0]["status"] == "applied"
-        assert diff["operations"]["adds"][0]["after"] == "after"
-
-    @pytest.mark.asyncio
-    async def test_memory_diff_includes_admission_trace_summary(self):
-        compressor = SessionCompressorV2(vikingdb=None)
-        user = UserIdentifier.the_default_user()
-        ctx = RequestContext(user=user, role=Role.ROOT)
-        memory_uri = "viking://agent/default/memories/experiences/debug.md"
-        viking_fs = MockVikingFS()
-        await viking_fs.write_file(
-            memory_uri,
-            MemoryFileUtils.write(MemoryFile(uri=memory_uri, content="after")),
-            ctx=ctx,
-        )
-
-        result = MemoryUpdateResult()
-        result.written_uris = [memory_uri]
-        operations = ResolvedOperations(
-            upsert_operations=[
-                ResolvedOperation(
-                    memory_fields={"content": "debug login issue"},
-                    memory_type="experiences",
-                    uris=[memory_uri],
-                )
-            ],
-            delete_file_contents=[],
-            errors=[],
-        )
-        decision = AdmissionDecision(
-            action="redirect_update",
-            reason="same_experience_name",
-            confidence=1.0,
-            target_uri=memory_uri,
-            candidate_uris=[memory_uri],
-            trace={
-                "uri": "viking://agent/default/memories/experiences/new_debug.md",
-                "output_uris": [memory_uri],
-                "memory_type": "experiences",
-                "input_shape": "create",
-                "fields": [
-                    {
-                        "field": "content",
-                        "merge_op": "replace",
-                        "input_shape": "str",
-                        "wrapper_shape": None,
-                    }
-                ],
-                "action": "redirect_update",
-                "decision": "redirect_update",
-                "status": "applied",
-                "applied": True,
-                "failed": False,
-                "skipped": False,
-                "candidate_count": 1,
-                "applied_to_uri": memory_uri,
-                "redirected": True,
-            },
-        )
-
-        diff = await compressor._build_memory_diff(
-            result=result,
-            operations=operations,
-            viking_fs=viking_fs,
-            ctx=ctx,
-            archive_uri="viking://account/default/session/test/history/archive_001",
-            admission_decisions=[decision],
-        )
-
-        assert diff["summary"]["total_admission_decisions"] == 1
-        assert diff["summary"]["admission_actions"] == {"redirect_update": 1}
-        assert diff["admission_decisions"][0]["action"] == "redirect_update"
-        assert diff["admission_decisions"][0]["fields"][0]["merge_op"] == "replace"
-        assert diff["operations"]["adds"][0]["after"] == "after"
-
-    @pytest.mark.asyncio
-    async def test_extract_phase_memory_diff_records_admission_redirect(self):
-        compressor = SessionCompressorV2(vikingdb=None)
-        user = UserIdentifier.the_default_user()
-        ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
-        archive_uri = "viking://session/test/history/archive_001"
-        old_uri = "viking://agent/default/memories/experiences/booking_duplicate_handling.md"
-        new_uri = "viking://agent/default/memories/experiences/duplicate_booking_handling.md"
-        old_memory = MemoryFile(
-            uri=old_uri,
-            content="## Situation\n- old\n\n## Approach\n- old\n\n## Reflect\n- old",
-            memory_type="experiences",
-            extra_fields={"experience_name": "booking_duplicate_handling"},
-        )
-        viking_fs = MockVikingFS()
-        viking_fs.agfs = object()
-        await viking_fs.write_file(old_uri, MemoryFileUtils.write(old_memory), ctx=ctx)
-
-        class DummyProvider:
-            prefetched_uris = [old_uri]
-            read_file_contents = {old_uri: old_memory}
-            _transaction_handle = None
-
-            def get_memory_schemas(self, _ctx):
-                return [
-                    MemoryTypeSchema(
-                        memory_type="experiences",
-                        fields=[
-                            MemoryField(
-                                name="content",
-                                field_type=FieldType.STRING,
-                                merge_op=MergeOp.REPLACE,
-                            ),
-                            MemoryField(
-                                name="experience_name",
-                                field_type=FieldType.STRING,
-                                merge_op=MergeOp.IMMUTABLE,
-                            ),
-                        ],
-                    )
-                ]
-
-            def _get_registry(self):
-                return {
-                    "experiences": MemoryTypeSchema(
-                        memory_type="experiences",
-                        fields=[
-                            MemoryField(
-                                name="content",
-                                field_type=FieldType.STRING,
-                                merge_op=MergeOp.REPLACE,
-                            ),
-                            MemoryField(
-                                name="experience_name",
-                                field_type=FieldType.STRING,
-                                merge_op=MergeOp.IMMUTABLE,
-                            ),
-                        ],
-                    )
-                }
-
-        class DummyExtractLoop:
-            def __init__(self, **kwargs):
-                pass
-
-            async def run(self):
-                return (
-                    ResolvedOperations(
-                        upsert_operations=[
-                            ResolvedOperation(
-                                old_memory_file_content=None,
-                                memory_fields={
-                                    "content": (
-                                        "## Situation\n- new\n\n"
-                                        "## Approach\n- new\n\n"
-                                        "## Reflect\n- new"
-                                    ),
-                                    "experience_name": "duplicate_booking_handling",
-                                },
-                                memory_type="experiences",
-                                uris=[new_uri],
-                            )
-                        ],
-                        delete_file_contents=[],
-                        errors=[],
-                    ),
-                    [],
-                )
-
-        class DummyUpdater:
-            async def apply_operations(self, operations, ctx, **kwargs):
-                assert (
-                    "viking://agent/default/memories/experiences/.experience_admission.ovlock"
-                    in handle.locks
-                )
-                op = operations.upsert_operations[0]
-                assert op.uris == [old_uri]
-                assert op.old_memory_file_content is old_memory
-                assert op.memory_fields["experience_name"] == "booking_duplicate_handling"
-
-                result = MemoryUpdateResult()
-                result.written_uris = [old_uri]
-                result.apply_traces = [
-                    {
-                        "uri": old_uri,
-                        "memory_type": "experiences",
-                        "field": "content",
-                        "merge_op": "replace",
-                        "input_shape": "str",
-                        "wrapper_shape": "replace_with_base",
-                        "stale_detected": False,
-                        "rewrite_attempted": None,
-                        "status": "applied",
-                    }
-                ]
-                await viking_fs.write_file(
-                    old_uri,
-                    MemoryFileUtils.write(
-                        MemoryFile(
-                            uri=old_uri,
-                            content="## Situation\n- new\n\n## Approach\n- new\n\n## Reflect\n- new",
-                            memory_type="experiences",
-                            extra_fields={"experience_name": "booking_duplicate_handling"},
-                        )
-                    ),
-                    ctx=ctx,
-                )
-                return result
-
-        config = SimpleNamespace(
-            vlm=SimpleNamespace(get_vlm_instance=lambda: object()),
-            memory=SimpleNamespace(
-                memory_apply_exact_file_lock_enabled=True,
-                role_id_memory_isolation_enabled=False,
-                v2_lock_max_retries=1,
-                v2_lock_retry_interval_seconds=0.0,
-            ),
-        )
-        handle = SimpleNamespace(id="handle-1", locks=[])
-
-        async def acquire_exact_path_batch(handle, paths, **kwargs):
-            handle.locks.extend(paths)
-            return True
-
-        async def release_selected(handle, paths):
-            for path in paths:
-                if path in handle.locks:
-                    handle.locks.remove(path)
-
-        lock_manager = SimpleNamespace(
-            create_handle=lambda: handle,
-            acquire_exact_tree_batch=AsyncMock(return_value=True),
-            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
-            release_selected=AsyncMock(side_effect=release_selected),
-            release=AsyncMock(),
-        )
-
-        with (
-            patch("openviking.session.compressor_v2.get_viking_fs", return_value=viking_fs),
-            patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
-            patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
-            patch("openviking.storage.transaction.init_lock_manager"),
-            patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
-            patch.object(compressor, "_get_or_create_updater", return_value=DummyUpdater()),
-        ):
-            result = await compressor._run_extract_phase(
-                provider=DummyProvider(),
-                messages=messages,
-                ctx=ctx,
-                strict_extract_errors=True,
-                phase_label="experience(viking://agent/default/memories/trajectories/traj.md)",
-                archive_uri=archive_uri,
-            )
-
-        assert result[0] == [old_uri]
-        lock_manager.acquire_exact_tree_batch.assert_not_awaited()
-        lock_manager.acquire_exact_path_batch.assert_awaited_once()
-        lock_manager.release_selected.assert_not_awaited()
-        lock_manager.release.assert_awaited_once_with(handle)
-        diff_uris = [
-            uri
-            for uri, entry in viking_fs._store.items()
-            if entry.get("type") == "file" and uri.startswith(f"{archive_uri}/memory_diff_")
-        ]
-        assert len(diff_uris) == 1
-        diff = json.loads(viking_fs._store[diff_uris[0]]["content"])
-        assert diff["summary"]["total_admission_decisions"] == 1
-        assert diff["summary"]["admission_actions"] == {"redirect_update": 1}
-        assert diff["admission_decisions"][0]["uri"] == new_uri
-        assert diff["admission_decisions"][0]["output_uris"] == [old_uri]
-        assert diff["admission_decisions"][0]["applied_to_uri"] == old_uri
-        assert diff["admission_decisions"][0]["redirected"] is True
-        assert diff["admission_decisions"][0]["status"] == "applied"
-        assert diff["operations"]["adds"] == []
-        assert diff["operations"]["updates"][0]["uri"] == old_uri
-        assert diff["operations"]["updates"][0]["before"] == old_memory.content
-        assert diff["operations"]["updates"][0]["after"].startswith("## Situation\n- new")
 
     @pytest.mark.asyncio
     async def test_extract_phase_skips_schema_lock_when_memory_apply_exact_file_lock_enabled(self):
@@ -1170,7 +828,7 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
         events: List[str] = []
 
         class FakeVikingFS:
@@ -1208,7 +866,7 @@ class TestCompressorV2:
                             ResolvedOperation(
                                 memory_fields={"content": "debug login issue"},
                                 memory_type="experiences",
-                                uris=["viking://agent/default/memories/experiences/debug.md"],
+                                uris=["viking://user/default/memories/experiences/debug.md"],
                             )
                         ],
                         delete_file_contents=[],
@@ -1221,7 +879,7 @@ class TestCompressorV2:
             async def apply_operations(self, operations, ctx, **kwargs):
                 events.append("apply")
                 result = MemoryUpdateResult()
-                result.written_uris = ["viking://agent/default/memories/experiences/debug.md"]
+                result.written_uris = ["viking://user/default/memories/experiences/debug.md"]
                 return result
 
         config = SimpleNamespace(
@@ -1239,33 +897,27 @@ class TestCompressorV2:
             handle.locks.extend(paths)
             return True
 
-        async def release_selected(handle, paths):
-            for path in paths:
-                if path in handle.locks:
-                    handle.locks.remove(path)
-
         lock_manager = SimpleNamespace(
             create_handle=lambda: handle,
             acquire_exact_tree_batch=AsyncMock(return_value=True),
             acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
-            release_selected=AsyncMock(side_effect=release_selected),
             release=AsyncMock(side_effect=lambda _handle: events.append("release")),
         )
 
         async def post_apply(result, inheritance_map, lock_handle, exact_file_lock_enabled):
-            assert result.written_uris == ["viking://agent/default/memories/experiences/debug.md"]
+            assert result.written_uris == ["viking://user/default/memories/experiences/debug.md"]
             assert inheritance_map == {}
             assert lock_handle is handle
             assert exact_file_lock_enabled is True
+            assert (
+                "viking://user/default/memories/experiences/.experience_admission.ovlock"
+                in lock_handle.locks
+            )
             events.append("post_apply")
 
         with (
             patch("openviking.session.compressor_v2.get_viking_fs", return_value=FakeVikingFS()),
             patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
             patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
             patch("openviking.storage.transaction.init_lock_manager"),
             patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
@@ -1280,23 +932,98 @@ class TestCompressorV2:
                 post_apply=post_apply,
             )
 
-        assert result[0] == ["viking://agent/default/memories/experiences/debug.md"]
+        assert result[0] == ["viking://user/default/memories/experiences/debug.md"]
         lock_manager.acquire_exact_tree_batch.assert_not_awaited()
         lock_manager.acquire_exact_path_batch.assert_awaited_once()
         assert lock_manager.acquire_exact_path_batch.await_args.args[0] is handle
         assert lock_manager.acquire_exact_path_batch.await_args.args[1] == [
-            "viking://agent/default/memories/experiences/.experience_admission.ovlock"
+            "viking://user/default/memories/experiences/.experience_admission.ovlock"
         ]
-        lock_manager.release_selected.assert_not_awaited()
-        lock_manager.release.assert_awaited_once_with(handle)
         assert events == ["apply", "post_apply", "release"]
+
+    @pytest.mark.asyncio
+    async def test_extract_phase_exact_mode_rejects_unsupported_agent_schema(self):
+        """Exact mode should not silently fall back to tree locks for agent schemas."""
+        compressor = SessionCompressorV2(vikingdb=None)
+        user = UserIdentifier.the_default_user()
+        ctx = RequestContext(user=user, role=Role.ROOT)
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
+
+        class FakeVikingFS:
+            agfs = object()
+
+            def _uri_to_path(self, uri: str, ctx=None) -> str:
+                return uri
+
+        class DummyProvider:
+            def get_memory_schemas(self, _ctx):
+                return [
+                    MemoryTypeSchema(
+                        memory_type="experiences",
+                        fields=[
+                            MemoryField(
+                                name="score",
+                                field_type=FieldType.INT64,
+                                merge_op=MergeOp.REPLACE,
+                            )
+                        ],
+                    )
+                ]
+
+            def _get_registry(self):
+                return object()
+
+        class DummyExtractLoop:
+            def __init__(self, **kwargs):
+                pass
+
+        config = SimpleNamespace(
+            vlm=SimpleNamespace(get_vlm_instance=lambda: object()),
+            memory=SimpleNamespace(
+                memory_apply_exact_file_lock_enabled=True,
+                role_id_memory_isolation_enabled=False,
+                v2_lock_max_retries=1,
+                v2_lock_retry_interval_seconds=0.0,
+            ),
+        )
+        handle = SimpleNamespace(id="handle-1", locks=[])
+
+        async def acquire_exact_path_batch(handle, paths, **kwargs):
+            handle.locks.extend(paths)
+            return True
+
+        lock_manager = SimpleNamespace(
+            create_handle=lambda: handle,
+            acquire_exact_tree_batch=AsyncMock(return_value=True),
+            acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
+            release=AsyncMock(),
+        )
+
+        with (
+            patch("openviking.session.compressor_v2.get_viking_fs", return_value=FakeVikingFS()),
+            patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
+            patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
+            patch("openviking.storage.transaction.init_lock_manager"),
+            patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
+        ):
+            with pytest.raises(RuntimeError, match="refusing tree-lock fallback") as exc_info:
+                await compressor._run_extract_phase(
+                    provider=DummyProvider(),
+                    messages=messages,
+                    ctx=ctx,
+                    strict_extract_errors=False,
+                    phase_label="experience(test)",
+                )
+
+        assert "experiences.score:replace:int64" in str(exc_info.value)
+        lock_manager.acquire_exact_tree_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_extract_phase_exact_mode_reraises_apply_failure(self):
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        messages = [Message.create_user("test")]
+        messages = [Message(id="msg-test", role="user", parts=[TextPart("test")])]
 
         class FakeVikingFS:
             agfs = object()
@@ -1333,7 +1060,7 @@ class TestCompressorV2:
                             ResolvedOperation(
                                 memory_fields={"content": "debug login issue"},
                                 memory_type="experiences",
-                                uris=["viking://agent/default/memories/experiences/debug.md"],
+                                uris=["viking://user/default/memories/experiences/debug.md"],
                             )
                         ],
                         delete_file_contents=[],
@@ -1361,26 +1088,16 @@ class TestCompressorV2:
             handle.locks.extend(paths)
             return True
 
-        async def release_selected(handle, paths):
-            for path in paths:
-                if path in handle.locks:
-                    handle.locks.remove(path)
-
         lock_manager = SimpleNamespace(
             create_handle=lambda: handle,
             acquire_exact_tree_batch=AsyncMock(return_value=True),
             acquire_exact_path_batch=AsyncMock(side_effect=acquire_exact_path_batch),
-            release_selected=AsyncMock(side_effect=release_selected),
             release=AsyncMock(),
         )
 
         with (
             patch("openviking.session.compressor_v2.get_viking_fs", return_value=FakeVikingFS()),
             patch("openviking.session.compressor_v2.get_openviking_config", return_value=config),
-            patch(
-                "openviking.session.memory.memory_isolation_handler.get_openviking_config",
-                return_value=config,
-            ),
             patch("openviking.session.compressor_v2.ExtractLoop", DummyExtractLoop),
             patch("openviking.storage.transaction.init_lock_manager"),
             patch("openviking.storage.transaction.get_lock_manager", return_value=lock_manager),
@@ -1394,10 +1111,6 @@ class TestCompressorV2:
                     strict_extract_errors=False,
                     phase_label="experience(test)",
                 )
-        lock_manager.acquire_exact_tree_batch.assert_not_awaited()
-        lock_manager.acquire_exact_path_batch.assert_awaited_once()
-        lock_manager.release_selected.assert_not_awaited()
-        lock_manager.release.assert_awaited_once_with(handle)
 
     @pytest.mark.asyncio
     async def test_append_trajectories_uses_exact_lock(self, monkeypatch):
@@ -1405,10 +1118,10 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        exp_uri = "viking://agent/default/memories/experiences/debug.md"
+        exp_uri = "viking://user/default/memories/experiences/debug.md"
         events: List[str] = []
 
-        traj_uri = "viking://agent/default/memories/trajectories/traj-1.md"
+        traj_uri = "viking://user/default/memories/trajectories/traj-1.md"
 
         class FakeVikingFS:
             def __init__(self):
@@ -1423,7 +1136,7 @@ class TestCompressorV2:
 
             def _uri_to_path(self, uri: str, ctx=None) -> str:
                 memory_path = uri.split("/memories/", 1)[1]
-                return f"/local/default/agent/default/memories/{memory_path}"
+                return f"/local/default/user/default/memories/{memory_path}"
 
             async def read_file(self, uri: str, ctx=None):
                 events.append("read")
@@ -1489,13 +1202,13 @@ class TestCompressorV2:
 
         # event order: lock → read exp → write exp → read traj → write traj → release
         assert events == [
-            "exact:/local/default/agent/default/memories/experiences/debug.md:timeout=None",
+            "exact:/local/default/user/default/memories/experiences/debug.md:timeout=None",
             "read",  # exp read
             "write",  # exp write (exp.links)
-            "exact:/local/default/agent/default/memories/trajectories/traj-1.md:timeout=None",
+            "exact:/local/default/user/default/memories/trajectories/traj-1.md:timeout=None",
             "read",  # traj read  (write_stored_links)
             "write",  # traj write (traj.backlinks)
-            "release_selected:['/local/default/agent/default/memories/trajectories/traj-1.md.path.ovlock']",
+            "release_selected:['/local/default/user/default/memories/trajectories/traj-1.md.path.ovlock']",
             "release",
         ]
 
@@ -1505,8 +1218,8 @@ class TestCompressorV2:
         compressor = SessionCompressorV2(vikingdb=None)
         user = UserIdentifier.the_default_user()
         ctx = RequestContext(user=user, role=Role.ROOT)
-        exp_uri = "viking://agent/default/memories/experiences/debug.md"
-        traj_uri = "viking://agent/default/memories/trajectories/traj-1.md"
+        exp_uri = "viking://user/default/memories/experiences/debug.md"
+        traj_uri = "viking://user/default/memories/trajectories/traj-1.md"
         events: List[str] = []
 
         class FakeVikingFS:
@@ -1611,11 +1324,10 @@ class TestExtractLoopPatchRepair:
 
         class DummyIsolationHandler:
             def get_read_scope(self):
-                return RoleScope(user_ids=["default"], agent_ids=["default"])
+                return RoleScope(user_ids=["default"])
 
-            def fill_role_ids(self, item_dict, role_scope):
+            def fill_identity_fields(self, item_dict, role_scope):
                 item_dict.setdefault("user_id", "default")
-                item_dict.setdefault("agent_id", "default")
 
             def calculate_memory_uris(self, memory_type_schema, operation, extract_context):
                 return [target_uri]
@@ -1709,11 +1421,10 @@ class TestExtractLoopPatchRepair:
 
         class DummyIsolationHandler:
             def get_read_scope(self):
-                return RoleScope(user_ids=["default"], agent_ids=["default"])
+                return RoleScope(user_ids=["default"])
 
-            def fill_role_ids(self, item_dict, role_scope):
+            def fill_identity_fields(self, item_dict, role_scope):
                 item_dict.setdefault("user_id", "default")
-                item_dict.setdefault("agent_id", "default")
 
             def calculate_memory_uris(self, memory_type_schema, operation, extract_context):
                 return [target_uri]
@@ -1806,11 +1517,10 @@ class TestExtractLoopPatchRepair:
 
         class DummyIsolationHandler:
             def get_read_scope(self):
-                return RoleScope(user_ids=["default"], agent_ids=["default"])
+                return RoleScope(user_ids=["default"])
 
-            def fill_role_ids(self, item_dict, role_scope):
+            def fill_identity_fields(self, item_dict, role_scope):
                 item_dict.setdefault("user_id", "default")
-                item_dict.setdefault("agent_id", "default")
 
             def calculate_memory_uris(self, memory_type_schema, operation, extract_context):
                 return [target_uri]

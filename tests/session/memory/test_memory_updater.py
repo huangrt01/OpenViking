@@ -10,7 +10,7 @@ import pytest
 
 from openviking.message import Message
 from openviking.message.part import TextPart
-from openviking.server.identity import AccountNamespacePolicy, RequestContext, Role
+from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.dataclass import (
     MemoryField,
     MemoryFile,
@@ -37,6 +37,7 @@ from openviking.session.memory.utils import (
     MemoryFileUtils,
     parse_memory_file_with_fields,
 )
+from openviking.telemetry import OperationTelemetry, bind_telemetry
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -164,7 +165,7 @@ class TestMemoryUpdater:
         extract_context.page_id_map.register_new_page_id(bob_uri, 100)
         isolation_handler = MagicMock()
 
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         result = await updater.apply_operations(
             operations=operations,
@@ -203,7 +204,7 @@ class TestMemoryUpdater:
             delete_file_contents=[],
             errors=[],
         )
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         with pytest.raises(ValueError, match="missing resolved URIs"):
             await updater.apply_operations(operations=operations, ctx=ctx)
@@ -241,7 +242,7 @@ class TestMemoryUpdater:
             delete_file_contents=[],
             errors=[],
         )
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         with pytest.raises(
             RuntimeError, match="Failed to apply operation under exact file-lock mode"
@@ -279,7 +280,7 @@ class TestMemoryUpdater:
             delete_file_contents=[],
             errors=[],
         )
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         result = await updater.apply_operations(operations=operations, ctx=ctx)
 
@@ -288,41 +289,12 @@ class TestMemoryUpdater:
         updater._vectorize_memories.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("policy", "schema_directory", "resolved_uri", "expected_directory", "memory_type"),
-        [
-            (
-                AccountNamespacePolicy(
-                    isolate_user_scope_by_agent=True,
-                    isolate_agent_scope_by_user=False,
-                ),
-                "viking://user/{{ user_space }}/memories/preferences",
-                "viking://user/alice/agent/bot/memories/preferences/theme.md",
-                "viking://user/alice/agent/bot/memories/preferences",
-                "preferences",
-            ),
-            (
-                AccountNamespacePolicy(
-                    isolate_user_scope_by_agent=False,
-                    isolate_agent_scope_by_user=True,
-                ),
-                "viking://agent/{{ agent_space }}/memories/tools",
-                "viking://agent/bot/user/alice/memories/tools/web_search.md",
-                "viking://agent/bot/user/alice/memories/tools",
-                "tools",
-            ),
-        ],
-    )
-    async def test_apply_operations_matches_overview_directories_with_namespace_policy(
-        self,
-        monkeypatch,
-        policy,
-        schema_directory,
-        resolved_uri,
-        expected_directory,
-        memory_type,
-    ):
-        """Overview generation should use policy-expanded user/agent space fragments."""
+    async def test_apply_operations_matches_overview_directory_from_resolved_user_uri(self):
+        """Overview generation should use the resolved user memory directory."""
+        memory_type = "preferences"
+        schema_directory = "viking://user/{{ user_space }}/memories/preferences"
+        resolved_uri = "viking://user/alice/memories/preferences/theme.md"
+        expected_directory = "viking://user/alice/memories/preferences"
         schema = MemoryTypeSchema(
             memory_type=memory_type,
             description=f"{memory_type} memory",
@@ -353,9 +325,8 @@ class TestMemoryUpdater:
         )
 
         ctx = RequestContext(
-            user=UserIdentifier("acme", "alice", "bot"),
+            user=UserIdentifier("acme", "alice"),
             role=Role.USER,
-            namespace_policy=policy,
         )
 
         result = await updater.apply_operations(operations=resolved, ctx=ctx)
@@ -370,13 +341,13 @@ class TestMemoryUpdater:
 
     @pytest.mark.asyncio
     async def test_apply_operations_skips_link_updates_for_deleted_uris(self, monkeypatch):
-        deleted_uri = "viking://agent/agent_sample_3/memories/experiences/old.md"
-        written_uri = "viking://agent/agent_sample_3/memories/experiences/new.md"
+        deleted_uri = "viking://user/user_sample_3/memories/experiences/old.md"
+        written_uri = "viking://user/user_sample_3/memories/experiences/new.md"
 
         schema = MemoryTypeSchema(
             memory_type="experiences",
             description="experience memory",
-            directory="viking://agent/{{ agent_space }}/memories/experiences",
+            directory="viking://user/{{ user_space }}/memories/experiences",
             filename_template="{{ experience_name }}.md",
             fields=[],
             overview_template="overview",
@@ -426,7 +397,7 @@ class TestMemoryUpdater:
         updater._apply_upsert = AsyncMock(side_effect=mock_apply_upsert)
         updater._apply_delete = AsyncMock(side_effect=mock_apply_delete)
 
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         result = await updater.apply_operations(operations=resolved, ctx=ctx)
 
@@ -524,7 +495,7 @@ class TestMemoryUpdater:
             ],
         )
 
-        ctx = RequestContext(user=UserIdentifier("acme", "alice", "bot"), role=Role.USER)
+        ctx = RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER)
 
         await updater.apply_operations(operations=operations, ctx=ctx)
 
@@ -843,14 +814,25 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        await updater._apply_upsert(op, MagicMock())
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            apply_traces = await updater._apply_upsert(op, MagicMock())
 
         parsed = parse_memory_file_with_fields(store[uri])
         assert parsed["title"] == "Updated Title"
         assert parsed["content"] == "Original body"
+        assert [trace["status"] for trace in apply_traces] == [
+            "applied",
+            "skipped_after_error",
+        ]
         trace_info.assert_any_call(
             f"[memory_updater] Skipping field update after merge_op failure: uri={uri}, field=content, error=patch failed"
         )
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 2
+        assert trace_summary["status"]["applied"] == 1
+        assert trace_summary["status"]["skipped_after_error"] == 1
+        assert "exact_file_lock" not in trace_summary
 
     @pytest.mark.asyncio
     async def test_apply_upsert_raises_field_failure_under_file_lock_mode(self, monkeypatch):
@@ -906,10 +888,16 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
         with pytest.raises(RuntimeError, match="merge_op failed under exact file-lock mode"):
-            await updater._apply_upsert(op, MagicMock())
+            with bind_telemetry(telemetry):
+                await updater._apply_upsert(op, MagicMock())
 
         mock_viking_fs.write_file.assert_not_awaited()
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["failed"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["failed"] == 1
 
     @pytest.mark.asyncio
     async def test_apply_upsert_wraps_plain_string_patch_with_read_base_under_file_lock_mode(
@@ -1032,7 +1020,9 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        apply_traces = await updater._apply_upsert(op, MagicMock())
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            apply_traces = await updater._apply_upsert(op, MagicMock())
 
         written = mock_viking_fs.write_file.await_args.args[1]
         parsed = parse_memory_file_with_fields(written)
@@ -1048,6 +1038,13 @@ class TestConsecutivePatchesSameURI:
         assert apply_traces[0]["rewrite_attempted"] == "merge_op_owned"
         assert apply_traces[0]["status"] == "applied"
         assert apply_traces[0]["changed"] is True
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["applied"] == 1
+        assert trace_summary["stale_detected"] == 1
+        assert trace_summary["rewrite_attempted"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["applied"] == 1
+        assert trace_summary["exact_file_lock"]["stale_detected"] == 1
 
     @pytest.mark.asyncio
     async def test_apply_upsert_plain_string_patch_records_stale_synthesis_trace_under_file_lock_mode(
@@ -1120,7 +1117,9 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        apply_traces = await updater._apply_upsert(op, MagicMock())
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            apply_traces = await updater._apply_upsert(op, MagicMock())
 
         written = mock_viking_fs.write_file.await_args.args[1]
         parsed = parse_memory_file_with_fields(written)
@@ -1136,6 +1135,13 @@ class TestConsecutivePatchesSameURI:
         assert apply_traces[0]["rewrite_attempted"] == "merge_op_owned"
         assert apply_traces[0]["status"] == "applied"
         assert apply_traces[0]["changed"] is True
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["applied"] == 1
+        assert trace_summary["stale_detected"] == 1
+        assert trace_summary["rewrite_attempted"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["applied"] == 1
+        assert trace_summary["exact_file_lock"]["rewrite_attempted"] == 1
 
     @pytest.mark.asyncio
     async def test_exact_plain_string_patch_does_not_apply_as_substring_patch(self, monkeypatch):
@@ -1241,10 +1247,12 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        result = await updater.apply_operations(
-            ResolvedOperations(upsert_operations=[op], delete_file_contents=[], errors=[]),
-            MagicMock(),
-        )
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            result = await updater.apply_operations(
+                ResolvedOperations(upsert_operations=[op], delete_file_contents=[], errors=[]),
+                MagicMock(),
+            )
 
         mock_viking_fs.write_file.assert_not_awaited()
         updater.generate_overview.assert_not_awaited()
@@ -1265,6 +1273,11 @@ class TestConsecutivePatchesSameURI:
         assert trace["rewrite_attempted"] == "not_applicable_unread_existing"
         assert trace["status"] == "skipped_stale_unread_existing"
         assert trace["changed"] is False
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["skipped_stale_unread_existing"] == 1
+        assert trace_summary["stale_detected"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["skipped_stale_unread_existing"] == 1
 
     @pytest.mark.asyncio
     async def test_apply_upsert_wraps_unstructured_patch_value_with_read_base_under_file_lock_mode(
@@ -1801,6 +1814,10 @@ class TestConsecutivePatchesSameURI:
         updater = MemoryUpdater(registry=registry)
         updater._get_viking_fs = MagicMock(return_value=mock_viking_fs)
         monkeypatch.setattr(
+            "openviking.session.memory.memory_updater._memory_apply_exact_file_lock_enabled",
+            lambda: True,
+        )
+        monkeypatch.setattr(
             "openviking.session.memory.memory_updater._exact_upsert_lock_context",
             lambda **kwargs: FakeExactLock(),
         )
@@ -1812,11 +1829,17 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
         with pytest.raises(RuntimeError, match="write failed"):
-            await updater._apply_upsert(op, MagicMock())
+            with bind_telemetry(telemetry):
+                await updater._apply_upsert(op, MagicMock())
 
         assert events == ["lock", "unlock"]
         assert mock_viking_fs.write_file.await_count == 1
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["failed"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["failed"] == 1
 
     @pytest.mark.asyncio
     async def test_apply_operations_exact_existing_update_skips_stale_deleted_latest(
@@ -1865,10 +1888,12 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        result = await updater.apply_operations(
-            ResolvedOperations(upsert_operations=[op], delete_file_contents=[], errors=[]),
-            MagicMock(),
-        )
+        telemetry = OperationTelemetry(operation="session.commit", enabled=True)
+        with bind_telemetry(telemetry):
+            result = await updater.apply_operations(
+                ResolvedOperations(upsert_operations=[op], delete_file_contents=[], errors=[]),
+                MagicMock(),
+            )
 
         mock_viking_fs.write_file.assert_not_awaited()
         updater.generate_overview.assert_not_awaited()
@@ -1888,6 +1913,11 @@ class TestConsecutivePatchesSameURI:
         assert trace["rewrite_attempted"] == "not_applicable_latest_deleted"
         assert trace["status"] == "skipped_stale_deleted"
         assert trace["changed"] is False
+        trace_summary = telemetry.finish().summary["memory"]["apply"]["trace"]
+        assert trace_summary["total"] == 1
+        assert trace_summary["status"]["skipped_stale_deleted"] == 1
+        assert trace_summary["stale_detected"] == 1
+        assert trace_summary["exact_file_lock"]["status"]["skipped_stale_deleted"] == 1
 
     @pytest.mark.asyncio
     async def test_write_stored_links_exact_lock_wraps_endpoint_update(self, monkeypatch):
