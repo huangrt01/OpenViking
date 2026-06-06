@@ -41,6 +41,7 @@ TRAIN_TRANSCRIPT_ROLE_TOOL_BLOCKS = "role_tool_blocks"
 TRAIN_TRANSCRIPT_CUSTOM_LIKE = "custom_like"
 TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
 TRAIN_OUTCOME_LABEL_ONLY = "label_only"
+TRAIN_OUTCOME_REWARD_INFO = "reward_info"
 MEMORY_CONSTRUCTOR_FULL = "full"
 MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY = "boundary_overlay"
 MEMORY_APPLICABILITY_GATE_NONE = "none"
@@ -244,6 +245,35 @@ def _outcome_label_message(sim: dict[str, Any]) -> str:
     )
 
 
+def _outcome_reward_info_message(sim: dict[str, Any]) -> str:
+    payload = {
+        "task_id": sim.get("task_id"),
+        "trial": sim.get("trial", 0),
+        "outcome_label": _outcome_label(sim),
+        "reward": _reward(sim),
+        "db_match": _db_match(sim),
+        "reward_info": sim.get("reward_info") or {},
+    }
+    return (
+        "training_outcome:\n"
+        "This is benchmark diagnostic feedback for memory extraction. Use it to "
+        "identify the decision boundary behind success or failure; do not copy "
+        "task-specific gold state into a serving instruction.\n"
+        "tau2_reward_info_json:\n"
+        f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _outcome_message(sim: dict[str, Any], mode: str) -> str:
+    if mode == TRAIN_OUTCOME_TRANSCRIPT_ONLY:
+        return ""
+    if mode == TRAIN_OUTCOME_LABEL_ONLY:
+        return _outcome_label_message(sim)
+    if mode == TRAIN_OUTCOME_REWARD_INFO:
+        return _outcome_reward_info_message(sim)
+    raise ValueError(f"Unsupported train outcome mode: {mode}")
+
+
 def _merge_numeric_counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
     totals: dict[str, int] = {}
     for row in rows:
@@ -258,8 +288,7 @@ def _merge_numeric_counts(rows: list[dict[str, Any]], field: str) -> dict[str, i
     return totals
 
 
-def _metrics(results_path: Path) -> dict[str, Any]:
-    data = json.loads(results_path.read_text())
+def _metrics_from_data(data: dict[str, Any]) -> dict[str, Any]:
     sims = data.get("simulations") or []
     rewards = [_reward(sim) for sim in sims]
     db_values = [_db_match(sim) for sim in sims]
@@ -271,6 +300,10 @@ def _metrics(results_path: Path) -> dict[str, Any]:
         if db_known
         else None,
     }
+
+
+def _metrics(results_path: Path) -> dict[str, Any]:
+    return _metrics_from_data(json.loads(results_path.read_text()))
 
 
 def _fill_retrieval_budget_defaults(args: argparse.Namespace) -> None:
@@ -764,6 +797,73 @@ def _memory_extract_skipped_from_task(task: dict[str, Any]) -> int:
         return 0
 
 
+def _commit_simulation_session(
+    args: argparse.Namespace,
+    *,
+    sim: dict[str, Any],
+    session_id: str,
+    outcome_mode: str,
+    system_prompt_text: str = "",
+    session_kind: str,
+) -> dict[str, Any]:
+    client = _client(args)
+    try:
+        created = client.create_session(session_id=session_id)
+        sid = created.get("session_id", session_id)
+        if system_prompt_text.strip():
+            client.add_message(
+                sid,
+                role="user",
+                parts=[{"type": "text", "text": f"system:\n{system_prompt_text}"}],
+            )
+        outcome_text = _outcome_message(sim, outcome_mode)
+        if outcome_text.strip():
+            client.add_message(
+                sid,
+                role="user",
+                parts=[{"type": "text", "text": outcome_text}],
+            )
+        tool_calls_by_id: dict[str, dict[str, Any]] = {}
+        for msg in sim.get("messages") or []:
+            for role, text in _message_texts(
+                msg,
+                transcript_format=args.train_transcript_format,
+                tool_calls_by_id=tool_calls_by_id,
+                max_tool_output_chars=args.train_tool_output_max_chars,
+            ):
+                if not text.strip():
+                    continue
+                client.add_message(
+                    sid,
+                    role=role,
+                    parts=[{"type": "text", "text": text}],
+                    created_at=msg.get("timestamp"),
+                )
+        result = client.commit_session(sid, telemetry=True)
+        task = _wait_task(client, result.get("task_id"), args.openviking_wait_timeout)
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        memory_extract_skipped = _memory_extract_skipped_from_task(task)
+        return {
+            "session_kind": session_kind,
+            "session_id": sid,
+            "task_id": sim.get("task_id"),
+            "trial": sim.get("trial", 0),
+            "outcome_mode": outcome_mode,
+            "outcome_label": _outcome_label(sim),
+            "reward": _reward(sim),
+            "db_match": _db_match(sim),
+            "commit_status": result.get("status"),
+            "openviking_task_id": result.get("task_id"),
+            "openviking_task_status": task.get("status"),
+            "memories_extracted": task_result.get("memories_extracted") or {},
+            "memory_extract_skipped": memory_extract_skipped,
+            "session_skills_extracted": task_result.get("session_skills_extracted", 0),
+            "active_count_updated": task_result.get("active_count_updated", 0),
+        }
+    finally:
+        client.close()
+
+
 def _read_memory_text(client: Any, match: Any) -> tuple[str, str | None]:
     try:
         return client.read(getattr(match, "uri", "")), None
@@ -1044,6 +1144,171 @@ def _raise_if_invalid_effect_evidence(evidence: dict[str, Any]) -> None:
     )
 
 
+def _simulation_key(sim: dict[str, Any]) -> tuple[str, str]:
+    return (str(sim.get("task_id")), str(sim.get("trial", 0)))
+
+
+def _failed_simulations(results_data: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        sim
+        for sim in results_data.get("simulations") or []
+        if sim.get("task_id") is not None and not _task_success(sim)
+    ]
+
+
+def _ordered_task_ids(sims: list[dict[str, Any]]) -> list[str]:
+    task_ids: list[str] = []
+    seen: set[str] = set()
+    for sim in sims:
+        task_id = str(sim.get("task_id"))
+        if task_id in seen:
+            continue
+        task_ids.append(task_id)
+        seen.add(task_id)
+    return task_ids
+
+
+def _replace_simulations_with_retry(
+    current_data: dict[str, Any], retry_data: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    replacements = {
+        _simulation_key(sim): sim for sim in retry_data.get("simulations") or []
+    }
+    replaced: list[dict[str, Any]] = []
+    merged = deepcopy(current_data)
+    merged_sims = []
+    for sim in current_data.get("simulations") or []:
+        key = _simulation_key(sim)
+        replacement = replacements.get(key)
+        if replacement is None:
+            merged_sims.append(sim)
+            continue
+        replaced.append(
+            {
+                "task_id": sim.get("task_id"),
+                "trial": sim.get("trial", 0),
+                "before_reward": _reward(sim),
+                "before_db_match": _db_match(sim),
+                "after_reward": _reward(replacement),
+                "after_db_match": _db_match(replacement),
+            }
+        )
+        merged_sims.append(replacement)
+    merged["simulations"] = merged_sims
+    return merged, replaced
+
+
+def _commit_retry_feedback_sessions(
+    args: argparse.Namespace,
+    failed_sims: list[dict[str, Any]],
+    *,
+    attempt_index: int,
+) -> list[dict[str, Any]]:
+    committed: list[dict[str, Any]] = []
+    for sim in failed_sims:
+        session_id = (
+            f"tau2-{args.domain}-eval-retry-{sim.get('task_id')}"
+            f"-trial-{sim.get('trial', 0)}-attempt-{attempt_index}"
+        )
+        committed.append(
+            _commit_simulation_session(
+                args,
+                sim=sim,
+                session_id=session_id,
+                outcome_mode=args.failed_task_retry_outcome_mode,
+                session_kind="eval_retry_feedback",
+            )
+        )
+    return committed
+
+
+def _run_failed_task_retries(
+    args: argparse.Namespace,
+    *,
+    eval_results: Path,
+    trace_path: Path,
+    user_name: str,
+) -> dict[str, Any]:
+    max_attempts = int(args.failed_task_retry_count or 0)
+    summary: dict[str, Any] = {
+        "enabled": max_attempts > 0,
+        "max_attempts": max_attempts,
+        "outcome_mode": args.failed_task_retry_outcome_mode,
+        "attempts": [],
+    }
+    if max_attempts <= 0:
+        return summary
+
+    initial_results = args.run_dir / f"{args.run_label}.initial.json"
+    shutil.copyfile(eval_results, initial_results)
+    current_data = json.loads(eval_results.read_text(encoding="utf-8"))
+    assert_tau2_results_complete(current_data, context=f"{args.domain} eval initial")
+    summary["initial_results"] = str(initial_results)
+    summary["initial_metrics"] = _metrics_from_data(current_data)
+
+    for attempt_index in range(1, max_attempts + 1):
+        failed_sims = _failed_simulations(current_data)
+        if not failed_sims:
+            break
+        task_ids = _ordered_task_ids(failed_sims)
+        before_metrics = _metrics_from_data(current_data)
+        committed_feedback = _commit_retry_feedback_sessions(
+            args,
+            failed_sims,
+            attempt_index=attempt_index,
+        )
+        retry_results = args.run_dir / f"{args.run_label}.retry{attempt_index}.json"
+        setattr(args, "eval_attempt_index", attempt_index)
+        _run_tau2(
+            tau2_repo=args.tau2_repo,
+            domain=args.domain,
+            split=args.eval_split_name,
+            task_ids=task_ids,
+            num_tasks=None,
+            trials=1,
+            max_steps=args.max_steps,
+            max_concurrency=min(max(1, args.max_concurrency), max(1, len(task_ids))),
+            agent=AGENT_NAME,
+            user=user_name,
+            agent_llm=args.agent_llm,
+            user_llm=args.user_llm,
+            agent_llm_args=args.agent_llm_args,
+            user_llm_args=args.user_llm_args,
+            seed=args.seed,
+            save_to=retry_results,
+        )
+        retry_data = json.loads(retry_results.read_text(encoding="utf-8"))
+        assert_tau2_results_complete(
+            retry_data,
+            context=f"{args.domain} eval retry attempt {attempt_index}",
+        )
+        current_data, replaced = _replace_simulations_with_retry(current_data, retry_data)
+        attempt_row = {
+            "attempt_index": attempt_index,
+            "failed_before_count": len(failed_sims),
+            "failed_task_ids": task_ids,
+            "committed_feedback_sessions": committed_feedback,
+            "retry_results": str(retry_results),
+            "replaced_simulations": replaced,
+            "metrics_before": before_metrics,
+            "metrics_after": _metrics_from_data(current_data),
+        }
+        summary["attempts"].append(attempt_row)
+
+    setattr(args, "eval_attempt_index", 0)
+    current_data["openviking_failed_task_retry"] = {
+        "max_attempts": max_attempts,
+        "outcome_mode": args.failed_task_retry_outcome_mode,
+        "attempt_count": len(summary["attempts"]),
+        "initial_results": str(initial_results),
+    }
+    _write_json(eval_results, current_data)
+    summary["final_metrics"] = _metrics_from_data(current_data)
+    summary["failed_after_count"] = len(_failed_simulations(current_data))
+    summary["retrieval_trace_summary_after_retries"] = _retrieval_trace_summary(trace_path)
+    return summary
+
+
 def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path) -> dict[str, Any]:
     requested_commit_concurrency = int(args.corpus_session_commit_concurrency)
     server_memory_config = _server_memory_config_report(args)
@@ -1176,62 +1441,18 @@ def _train(args: argparse.Namespace, train_results: Path, corpus_manifest: Path)
         commit_jobs.append((index, sim))
 
     def commit_one(index: int, sim: dict[str, Any]) -> dict[str, Any]:
-        client = _client(args)
-        try:
-            session_id = (
-                f"tau2-{args.domain}-train-{sim.get('task_id')}-trial-{sim.get('trial', 0)}"
-            )
-            created = client.create_session(session_id=session_id)
-            sid = created.get("session_id", session_id)
-            if system_prompt_text.strip():
-                client.add_message(
-                    sid,
-                    role="user",
-                    parts=[{"type": "text", "text": f"system:\n{system_prompt_text}"}],
-                )
-            if train_outcome_mode == TRAIN_OUTCOME_LABEL_ONLY:
-                client.add_message(
-                    sid,
-                    role="user",
-                    parts=[{"type": "text", "text": _outcome_label_message(sim)}],
-                )
-            tool_calls_by_id: dict[str, dict[str, Any]] = {}
-            for msg in sim.get("messages") or []:
-                for role, text in _message_texts(
-                    msg,
-                    transcript_format=args.train_transcript_format,
-                    tool_calls_by_id=tool_calls_by_id,
-                    max_tool_output_chars=args.train_tool_output_max_chars,
-                ):
-                    if not text.strip():
-                        continue
-                    client.add_message(
-                        sid,
-                        role=role,
-                        parts=[{"type": "text", "text": text}],
-                        created_at=msg.get("timestamp"),
-                    )
-            result = client.commit_session(sid, telemetry=True)
-            task = _wait_task(client, result.get("task_id"), args.openviking_wait_timeout)
-            task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
-            memory_extract_skipped = _memory_extract_skipped_from_task(task)
-            return {
-                "_input_index": index,
-                "session_id": sid,
-                "task_id": sim.get("task_id"),
-                "trial": sim.get("trial", 0),
-                "reward": _reward(sim),
-                "db_match": _db_match(sim),
-                "commit_status": result.get("status"),
-                "openviking_task_id": result.get("task_id"),
-                "openviking_task_status": task.get("status"),
-                "memories_extracted": task_result.get("memories_extracted") or {},
-                "memory_extract_skipped": memory_extract_skipped,
-                "session_skills_extracted": task_result.get("session_skills_extracted", 0),
-                "active_count_updated": task_result.get("active_count_updated", 0),
-            }
-        finally:
-            client.close()
+        session_id = f"tau2-{args.domain}-train-{sim.get('task_id')}-trial-{sim.get('trial', 0)}"
+        return {
+            "_input_index": index,
+            **_commit_simulation_session(
+                args,
+                sim=sim,
+                session_id=session_id,
+                outcome_mode=train_outcome_mode,
+                system_prompt_text=system_prompt_text,
+                session_kind="train",
+            ),
+        }
 
     committed_rows: list[dict[str, Any]] = []
     worker_count = min(max(1, requested_commit_concurrency), len(commit_jobs) or 1)
@@ -1529,6 +1750,7 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 self._trace(
                     {
                         "decision_node": "first_user",
+                        "eval_attempt_index": int(getattr(args, "eval_attempt_index", 0) or 0),
                         "query": query,
                         "search_limit": args.first_user_retrieval_top_k,
                         "inject_limit": args.first_user_inject_top_k,
@@ -1556,6 +1778,9 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                     self._trace(
                         {
                             "decision_node": "before_write_tool_call",
+                            "eval_attempt_index": int(
+                                getattr(args, "eval_attempt_index", 0) or 0
+                            ),
                             "query": query,
                             "search_limit": args.prewrite_retrieval_top_k,
                             "inject_limit": args.prewrite_inject_top_k,
@@ -1703,11 +1928,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--train-outcome-mode",
-        choices=[TRAIN_OUTCOME_TRANSCRIPT_ONLY, TRAIN_OUTCOME_LABEL_ONLY],
+        choices=[
+            TRAIN_OUTCOME_TRANSCRIPT_ONLY,
+            TRAIN_OUTCOME_LABEL_ONLY,
+            TRAIN_OUTCOME_REWARD_INFO,
+        ],
         default=TRAIN_OUTCOME_TRANSCRIPT_ONLY,
         help=(
-            "Whether to replay only the train transcript or prepend a coarse "
-            "success/failure outcome label before memory extraction."
+            "Whether to replay only the train transcript, prepend a coarse "
+            "success/failure label, or prepend full TAU-2 reward_info before "
+            "memory extraction."
         ),
     )
     parser.add_argument(
@@ -1738,6 +1968,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--failed-task-retry-count",
+        type=int,
+        default=0,
+        help=(
+            "After the first memory eval pass, commit each failed eval transcript as "
+            "outcome feedback, wait for OpenViking extraction, then retry those same "
+            "task ids up to this many times."
+        ),
+    )
+    parser.add_argument(
+        "--failed-task-retry-outcome-mode",
+        choices=[TRAIN_OUTCOME_LABEL_ONLY, TRAIN_OUTCOME_REWARD_INFO],
+        default=TRAIN_OUTCOME_REWARD_INFO,
+        help="Outcome payload used when committing failed eval attempts for retry feedback.",
+    )
+    parser.add_argument(
         "--retrieval-mode",
         choices=["first_user", "prewrite", "first_user_prewrite"],
         default="first_user",
@@ -1755,6 +2001,18 @@ def main() -> int:
         parser.error("--train-tool-output-max-chars must be positive")
     if args.corpus_session_commit_concurrency < 1:
         parser.error("--corpus-session-commit-concurrency must be >= 1")
+    if args.failed_task_retry_count < 0:
+        parser.error("--failed-task-retry-count must be >= 0")
+    if args.no_memory and args.failed_task_retry_count:
+        parser.error("--failed-task-retry-count requires an OpenViking memory run")
+    if (
+        args.failed_task_retry_count
+        and args.expected_agent_experience_failure_integration_mode != "comparative_insight"
+    ):
+        parser.error(
+            "--failed-task-retry-count requires "
+            "--expected-agent-experience-failure-integration-mode=comparative_insight"
+        )
     for name in (
         "memory_inject_max_chars",
         "first_user_memory_inject_max_chars",
@@ -1867,6 +2125,7 @@ def main() -> int:
         return 0
 
     trace_path.touch()
+    setattr(args, "eval_attempt_index", 0)
     _register_memory_agent(args, trace_path)
     user_name = _register_fixed_first_user(args)
     _run_tau2(
@@ -1890,6 +2149,12 @@ def main() -> int:
     assert_tau2_results_complete(
         json.loads(eval_results.read_text()), context=f"{args.domain} eval"
     )
+    failed_task_retry = _run_failed_task_retries(
+        args,
+        eval_results=eval_results,
+        trace_path=trace_path,
+        user_name=user_name,
+    )
     metrics = _metrics(eval_results)
     trace_summary = _retrieval_trace_summary(trace_path)
     effect_evidence = _effect_evidence_summary(metrics, trace_summary)
@@ -1912,7 +2177,9 @@ def main() -> int:
         "train_transcript_format": args.train_transcript_format,
         "train_include_system_prompt": bool(args.train_include_system_prompt),
         "train_skip_failed_sessions": bool(args.train_skip_failed_sessions),
+        "train_outcome_mode": args.train_outcome_mode,
         "train_tool_output_max_chars": args.train_tool_output_max_chars,
+        "failed_task_retry": failed_task_retry,
         "seed": args.seed,
         "fixed_first_user_file": str(args.fixed_first_user_file)
         if args.fixed_first_user_file

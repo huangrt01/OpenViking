@@ -31,6 +31,8 @@ from tau2_common import (
 
 TRAIN_TRANSCRIPT_OPENVIKING_TEXT = "openviking_text"
 TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
+TRAIN_OUTCOME_LABEL_ONLY = "label_only"
+TRAIN_OUTCOME_REWARD_INFO = "reward_info"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -278,7 +280,37 @@ def _train_skip_failed_sessions(strategy: dict[str, Any]) -> bool:
 
 
 def _train_outcome_mode(strategy: dict[str, Any]) -> str:
-    return str(strategy.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY)
+    mode = str(strategy.get("train_outcome_mode") or TRAIN_OUTCOME_TRANSCRIPT_ONLY)
+    if mode not in {
+        TRAIN_OUTCOME_TRANSCRIPT_ONLY,
+        TRAIN_OUTCOME_LABEL_ONLY,
+        TRAIN_OUTCOME_REWARD_INFO,
+    }:
+        raise ValueError(
+            "train_outcome_mode must be one of "
+            f"transcript_only, label_only, reward_info; got {mode!r}"
+        )
+    return mode
+
+
+def _failed_task_retry_count(config: dict[str, Any], strategy: dict[str, Any]) -> int:
+    raw = strategy.get("failed_task_retry_count")
+    if raw is None:
+        raw = config.get("openviking", {}).get("failed_task_retry_count", 0)
+    count = int(raw or 0)
+    if count < 0:
+        raise ValueError(f"failed_task_retry_count must be >= 0, got {count!r}")
+    return count
+
+
+def _failed_task_retry_outcome_mode(strategy: dict[str, Any]) -> str:
+    mode = str(strategy.get("failed_task_retry_outcome_mode") or TRAIN_OUTCOME_REWARD_INFO)
+    if mode not in {TRAIN_OUTCOME_LABEL_ONLY, TRAIN_OUTCOME_REWARD_INFO}:
+        raise ValueError(
+            "failed_task_retry_outcome_mode must be one of "
+            f"label_only, reward_info; got {mode!r}"
+        )
+    return mode
 
 
 def _train_results_file(
@@ -501,6 +533,15 @@ def _tau2_command(
         if _train_skip_failed_sessions(strategy):
             command.append("--train-skip-failed-sessions")
         command.extend(["--train-outcome-mode", _train_outcome_mode(strategy)])
+        retry_count = _failed_task_retry_count(config, strategy)
+        if retry_count:
+            command.extend(["--failed-task-retry-count", str(retry_count)])
+            command.extend(
+                [
+                    "--failed-task-retry-outcome-mode",
+                    _failed_task_retry_outcome_mode(strategy),
+                ]
+            )
         train_results_file = _train_results_file(config, strategy, domain)
         if train_results_file is not None:
             command.extend(["--train-results-file", str(train_results_file)])
@@ -721,6 +762,13 @@ def _build_plan(
                         "retrieval_mode": strategy.get("retrieval_mode"),
                         "train_transcript_format": _train_transcript_format(strategy),
                         "train_outcome_mode": _train_outcome_mode(strategy),
+                        "failed_task_retry_count": _failed_task_retry_count(
+                            config,
+                            strategy,
+                        ),
+                        "failed_task_retry_outcome_mode": _failed_task_retry_outcome_mode(
+                            strategy
+                        ),
                         "train_results_file": (
                             str(_train_results_file(config, strategy, domain))
                             if _train_results_file(config, strategy, domain) is not None

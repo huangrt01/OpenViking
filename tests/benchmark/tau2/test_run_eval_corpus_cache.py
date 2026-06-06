@@ -248,6 +248,41 @@ def test_memory_applicability_gate_mode_defaults_and_validates():
         )
 
 
+def test_train_outcome_and_failed_retry_modes_validate():
+    run_eval = _load_run_eval()
+
+    assert run_eval._train_outcome_mode({}) == "transcript_only"
+    assert run_eval._train_outcome_mode({"train_outcome_mode": "reward_info"}) == "reward_info"
+    assert run_eval._failed_task_retry_count({"openviking": {}}, {}) == 0
+    assert (
+        run_eval._failed_task_retry_count(
+            {"openviking": {"failed_task_retry_count": 2}},
+            {},
+        )
+        == 2
+    )
+    assert (
+        run_eval._failed_task_retry_count(
+            {"openviking": {"failed_task_retry_count": 2}},
+            {"failed_task_retry_count": 1},
+        )
+        == 1
+    )
+    assert run_eval._failed_task_retry_outcome_mode({}) == "reward_info"
+    assert (
+        run_eval._failed_task_retry_outcome_mode(
+            {"failed_task_retry_outcome_mode": "label_only"}
+        )
+        == "label_only"
+    )
+    with pytest.raises(ValueError, match="train_outcome_mode"):
+        run_eval._train_outcome_mode({"train_outcome_mode": "bad"})
+    with pytest.raises(ValueError, match="failed_task_retry_count"):
+        run_eval._failed_task_retry_count({"openviking": {}}, {"failed_task_retry_count": -1})
+    with pytest.raises(ValueError, match="failed_task_retry_outcome_mode"):
+        run_eval._failed_task_retry_outcome_mode({"failed_task_retry_outcome_mode": "bad"})
+
+
 def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     run_eval = _load_run_eval()
     config = {
@@ -281,6 +316,10 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
         "corpus_id": "c1",
         "memory_constructor_mode": "boundary_overlay",
         "memory_applicability_gate_mode": "prewrite_action_overlap",
+        "train_outcome_mode": "reward_info",
+        "failed_task_retry_count": 2,
+        "failed_task_retry_outcome_mode": "reward_info",
+        "agent_experience_failure_integration_mode": "comparative_insight",
     }
 
     command = run_eval._tau2_command(
@@ -300,3 +339,11 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     assert command[index + 1] == "boundary_overlay"
     index = command.index("--memory-applicability-gate-mode")
     assert command[index + 1] == "prewrite_action_overlap"
+    index = command.index("--train-outcome-mode")
+    assert command[index + 1] == "reward_info"
+    index = command.index("--failed-task-retry-count")
+    assert command[index + 1] == "2"
+    index = command.index("--failed-task-retry-outcome-mode")
+    assert command[index + 1] == "reward_info"
+    index = command.index("--expected-agent-experience-failure-integration-mode")
+    assert command[index + 1] == "comparative_insight"

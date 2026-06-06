@@ -348,6 +348,66 @@ def test_effect_evidence_gate_accepts_matched_injected_retrieval(tmp_path):
     module._raise_if_invalid_effect_evidence(evidence)
 
 
+def test_reward_info_outcome_message_preserves_tau2_reward_details():
+    module = _load_runner_module()
+
+    text = module._outcome_message(
+        {
+            "task_id": "32",
+            "trial": 0,
+            "reward_info": {
+                "reward": 0.0,
+                "db_check": {"score": False, "diff": {"reservation": "changed"}},
+                "nl_assertions": [{"score": False, "message": "Wrong cabin"}],
+            },
+        },
+        module.TRAIN_OUTCOME_REWARD_INFO,
+    )
+
+    assert "tau2_reward_info_json:" in text
+    payload = json.loads(text.rsplit("tau2_reward_info_json:", 1)[1])
+    assert payload["task_id"] == "32"
+    assert payload["outcome_label"] == "failure"
+    assert payload["reward"] == 0.0
+    assert payload["db_match"] is False
+    assert payload["reward_info"]["nl_assertions"][0]["message"] == "Wrong cabin"
+
+
+def test_replace_simulations_with_retry_keeps_non_retried_tasks():
+    module = _load_runner_module()
+    current = {
+        "simulations": [
+            {"task_id": "18", "trial": 0, "reward_info": {"reward": 1.0}},
+            {"task_id": "32", "trial": 0, "reward_info": {"reward": 0.0}},
+        ]
+    }
+    retry = {
+        "simulations": [
+            {
+                "task_id": "32",
+                "trial": 0,
+                "reward_info": {"reward": 1.0, "db_check": {"score": True}},
+            }
+        ]
+    }
+
+    merged, replaced = module._replace_simulations_with_retry(current, retry)
+
+    assert [sim["task_id"] for sim in merged["simulations"]] == ["18", "32"]
+    assert module._reward(merged["simulations"][0]) == 1.0
+    assert module._reward(merged["simulations"][1]) == 1.0
+    assert replaced == [
+        {
+            "task_id": "32",
+            "trial": 0,
+            "before_reward": 0.0,
+            "before_db_match": None,
+            "after_reward": 1.0,
+            "after_db_match": True,
+        }
+    ]
+
+
 def test_retrieval_budget_defaults_preserve_explicit_zero_inject_limit():
     module = _load_runner_module()
     args = SimpleNamespace(
