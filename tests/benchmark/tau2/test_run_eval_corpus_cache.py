@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,6 +86,37 @@ def test_tau2_subprocess_env_prioritizes_current_openviking_checkout(
     entries = env["PYTHONPATH"].split(os.pathsep)
     assert entries[:2] == [str(run_eval.REPO_ROOT), str(tau2_src)]
     assert entries[2:] == [stale_openviking, other_path]
+
+
+def test_execute_cell_records_metrics_parse_error(tmp_path, monkeypatch):
+    run_eval = _load_run_eval()
+    cell = {
+        "run_label": "cell-1",
+        "domain": "airline",
+        "strategy_id": "memory",
+        "memory_backend": "openviking",
+        "corpus_dir": str(tmp_path / "corpus"),
+        "command": ["python", "-c", "pass"],
+    }
+
+    monkeypatch.setattr(
+        run_eval.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        run_eval,
+        "_cell_metrics",
+        lambda cell, artifacts: (_ for _ in ()).throw(RuntimeError("bad metrics")),
+    )
+
+    row = run_eval._execute_cell(cell, tmp_path, tmp_path / "out", None)
+
+    assert row["returncode"] == 0
+    assert row["metrics"] is None
+    assert row["metrics_error"] == "RuntimeError: bad metrics"
+    written = json.loads((tmp_path / "out" / "cell_results" / "cell-1.json").read_text())
+    assert written["metrics_error"] == "RuntimeError: bad metrics"
 
 
 def test_prepare_memory_corpus_reuses_cache_by_requested_commit_concurrency(tmp_path):
@@ -300,10 +332,11 @@ def test_memory_corpus_key_isolates_eval_memory_writes_by_repeat():
             domain="airline",
             strategy=strategy,
             train_num_tasks=3,
+            eval_write_namespace="run:1 / s1",
             repeat_index=2,
             repeat_isolated=True,
         )
-        == "airline_c1_train3_r2"
+        == "airline_c1_train3_run_1_s1_r2"
     )
     with pytest.raises(ValueError, match="repeat_index"):
         run_eval._memory_corpus_key_for(
@@ -386,8 +419,8 @@ def test_run_plan_isolates_failed_retry_corpora_by_repeat(tmp_path):
     assert read_r2["corpus_key"] == "airline_shared"
     assert read_r1["repeat_isolated_corpus"] is False
     assert read_r2["repeat_isolated_corpus"] is False
-    assert retry_r1["corpus_key"] == "airline_retry_r1"
-    assert retry_r2["corpus_key"] == "airline_retry_r2"
+    assert retry_r1["corpus_key"] == "airline_retry_run1_memory_retry_r1"
+    assert retry_r2["corpus_key"] == "airline_retry_run1_memory_retry_r2"
     assert retry_r1["eval_memory_writes"] is True
     assert retry_r2["repeat_isolated_corpus"] is True
 
@@ -397,6 +430,95 @@ def test_run_plan_isolates_failed_retry_corpora_by_repeat(tmp_path):
         account_index = command.index("--openviking-account")
         assert command[corpus_dir_index + 1] == cell["corpus_dir"]
         assert command[account_index + 1] == f"acct-{cell['corpus_key']}"
+
+
+def test_run_plan_isolates_failed_retry_corpora_by_strategy_and_run(tmp_path):
+    run_eval = _load_run_eval()
+    base_config = {
+        "benchmark": {
+            "domains": ["airline"],
+            "train_split_name": "train",
+            "eval_split_name": "test",
+            "repeat_count": 1,
+            "seed": 300,
+            "max_steps": 200,
+            "task_max_concurrency": 1,
+        },
+        "eval": {
+            "require_fixed_first_user": False,
+            "user_simulator_policy": "official",
+        },
+        "model": {
+            "agent_llm": "agent-model",
+            "user_llm": "user-model",
+        },
+        "openviking": {
+            "url": "http://127.0.0.1:9999",
+            "account": "acct",
+            "timeout_seconds": 600,
+            "wait_timeout_seconds": 600,
+            "reuse_corpus_across_runs": True,
+        },
+        "paths": {
+            "tau2_repo": str(tmp_path / "tau2"),
+            "output_dir": str(tmp_path / "result"),
+            "corpus_cache_dir": str(tmp_path / "corpora"),
+        },
+        "strategies": [
+            {
+                "id": "memory_retry_a",
+                "memory_backend": "openviking",
+                "train_memory_mode": "experience_only",
+                "corpus_id": "same_train_corpus",
+                "failed_task_retry_count": 2,
+            },
+            {
+                "id": "memory_retry_b",
+                "memory_backend": "openviking",
+                "train_memory_mode": "experience_only",
+                "corpus_id": "same_train_corpus",
+                "failed_task_retry_count": 2,
+            },
+        ],
+    }
+
+    plan_a = run_eval._build_plan(
+        base_config,
+        "runA",
+        selected_domains=None,
+        selected_strategy_ids=None,
+        task_ids=None,
+        num_tasks=1,
+        train_num_tasks=None,
+        repeat_count_override=None,
+        cell_concurrency_override=None,
+        strategy_concurrency_override=None,
+    )
+    plan_b = run_eval._build_plan(
+        base_config,
+        "runB",
+        selected_domains=None,
+        selected_strategy_ids=None,
+        task_ids=None,
+        num_tasks=1,
+        train_num_tasks=None,
+        repeat_count_override=None,
+        cell_concurrency_override=None,
+        strategy_concurrency_override=None,
+    )
+
+    keys_a = {cell["corpus_key"] for cell in plan_a["cells"]}
+    keys_b = {cell["corpus_key"] for cell in plan_b["cells"]}
+
+    assert keys_a == {
+        "airline_same_train_corpus_runA_memory_retry_a_r1",
+        "airline_same_train_corpus_runA_memory_retry_b_r1",
+    }
+    assert keys_b == {
+        "airline_same_train_corpus_runB_memory_retry_a_r1",
+        "airline_same_train_corpus_runB_memory_retry_b_r1",
+    }
+    assert keys_a.isdisjoint(keys_b)
 
 
 def test_tau2_command_passes_memory_constructor_mode(tmp_path):

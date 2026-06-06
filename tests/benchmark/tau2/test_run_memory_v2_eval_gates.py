@@ -418,6 +418,77 @@ def test_replace_simulations_with_retry_keeps_non_retried_tasks():
     ]
 
 
+def test_failed_task_retry_records_incomplete_retry_results(tmp_path, monkeypatch):
+    module = _load_runner_module()
+    eval_results = tmp_path / "run.json"
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        json.dumps({"match_count": 1, "injected_count": 1, "matches": []}) + "\n",
+        encoding="utf-8",
+    )
+    eval_results.write_text(
+        json.dumps(
+            {
+                "simulations": [
+                    {"task_id": "19", "trial": 0, "reward_info": {"reward": 0.0}},
+                    {"task_id": "29", "trial": 0, "reward_info": {"reward": 1.0}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_assert_complete(data, *, context):
+        if "retry attempt" in context:
+            raise RuntimeError("missing retry task ids")
+
+    def fake_run_tau2(**kwargs):
+        kwargs["save_to"].write_text(json.dumps({"simulations": []}), encoding="utf-8")
+
+    monkeypatch.setattr(module, "assert_tau2_results_complete", fake_assert_complete)
+    monkeypatch.setattr(module, "_run_tau2", fake_run_tau2)
+    monkeypatch.setattr(
+        module,
+        "_commit_retry_feedback_sessions",
+        lambda args, failed_sims, *, attempt_index: [
+            {"session_id": f"retry-{sim['task_id']}", "task_id": sim["task_id"]}
+            for sim in failed_sims
+        ],
+    )
+
+    summary = module._run_failed_task_retries(
+        SimpleNamespace(
+            failed_task_retry_count=1,
+            failed_task_retry_outcome_mode=module.TRAIN_OUTCOME_REWARD_INFO,
+            run_dir=tmp_path,
+            run_label="run",
+            domain="airline",
+            tau2_repo=tmp_path / "tau2",
+            eval_split_name="test",
+            max_steps=200,
+            max_concurrency=3,
+            agent_llm="model",
+            user_llm="model",
+            agent_llm_args={},
+            user_llm_args={},
+            seed=123,
+        ),
+        eval_results=eval_results,
+        trace_path=trace_path,
+        user_name="fixed_user",
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["failed_attempt_index"] == 1
+    assert "missing retry task ids" in summary["error"]
+    assert summary["attempts"][0]["failed_task_ids"] == ["19"]
+    updated = json.loads(eval_results.read_text(encoding="utf-8"))
+    retry_meta = updated["openviking_failed_task_retry"]
+    assert retry_meta["status"] == "failed"
+    assert retry_meta["failed_attempt_index"] == 1
+    assert (tmp_path / "run.initial.json").is_file()
+
+
 def test_retry_feedback_session_ids_include_run_label(monkeypatch):
     module = _load_runner_module()
     committed_session_ids = []

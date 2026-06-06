@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -116,6 +117,13 @@ def _enabled(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _key_component(value: str) -> str:
+    component = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
+    if not component:
+        raise ValueError(f"corpus key component cannot be empty: {value!r}")
+    return component
 
 
 def _positive_int(value: Any, *, name: str) -> int:
@@ -237,6 +245,7 @@ def _memory_corpus_key_for(
     domain: str,
     strategy: dict[str, Any],
     train_num_tasks: int | None,
+    eval_write_namespace: str | None = None,
     repeat_index: int | None = None,
     repeat_isolated: bool = False,
 ) -> str:
@@ -252,6 +261,8 @@ def _memory_corpus_key_for(
         key = f"{domain}_{corpus_id}"
     if train_num_tasks is not None:
         key = f"{key}_train{train_num_tasks}"
+    if eval_write_namespace:
+        key = f"{key}_{_key_component(eval_write_namespace)}"
     if repeat_isolated:
         if repeat_index is None or repeat_index < 1:
             raise ValueError(
@@ -323,6 +334,10 @@ def _failed_task_retry_outcome_mode(strategy: dict[str, Any]) -> str:
 
 def _eval_memory_writes_enabled(config: dict[str, Any], strategy: dict[str, Any]) -> bool:
     return _failed_task_retry_count(config, strategy) > 0
+
+
+def _eval_memory_write_namespace(configured_run_id: str, strategy: dict[str, Any]) -> str:
+    return f"{configured_run_id}_{strategy['id']}"
 
 
 def _repeat_isolated_corpus_for_eval_writes(
@@ -440,6 +455,11 @@ def _tau2_command(
             domain=domain,
             strategy=strategy,
             train_num_tasks=resolved_train_num_tasks,
+            eval_write_namespace=(
+                _eval_memory_write_namespace(configured_run_id, strategy)
+                if _eval_memory_writes_enabled(config, strategy)
+                else None
+            ),
             repeat_index=repeat_index,
             repeat_isolated=_repeat_isolated_corpus_for_eval_writes(config, strategy),
         )
@@ -740,6 +760,11 @@ def _build_plan(
                     domain=domain,
                     strategy=strategy,
                     train_num_tasks=resolved_train_num_tasks,
+                    eval_write_namespace=(
+                        _eval_memory_write_namespace(configured_run_id, strategy)
+                        if eval_memory_writes
+                        else None
+                    ),
                     repeat_index=plan_repeat_index,
                     repeat_isolated=repeat_isolated_corpus,
                 )
@@ -1150,6 +1175,18 @@ def _execute_cell(
         }
         write_json(cell_result_path, row)
         return row
+    except Exception as exc:
+        row = {
+            "run_label": cell["run_label"],
+            "domain": cell["domain"],
+            "strategy_id": cell["strategy_id"],
+            "returncode": 1,
+            "error": f"{type(exc).__name__}: {exc}",
+            "artifacts": _cell_artifacts(cell, repo, out),
+            "metrics": None,
+        }
+        write_json(cell_result_path, row)
+        return row
 
     row = {
         "run_label": cell["run_label"],
@@ -1160,7 +1197,11 @@ def _execute_cell(
         "stderr_tail": completed.stderr[-4000:],
     }
     row["artifacts"] = _cell_artifacts(cell, repo, out)
-    row["metrics"] = _cell_metrics(cell, row["artifacts"])
+    try:
+        row["metrics"] = _cell_metrics(cell, row["artifacts"])
+    except Exception as exc:
+        row["metrics"] = None
+        row["metrics_error"] = f"{type(exc).__name__}: {exc}"
     write_json(cell_result_path, row)
     return row
 
@@ -1196,7 +1237,22 @@ def _execute_cells(plan: dict[str, Any], repo: Path, out: Path) -> list[dict[str
             executor.submit(_execute_cell, cell, repo, out, cell_timeout): cell for cell in cells
         }
         for future in as_completed(futures):
-            rows.append(future.result())
+            cell = futures[future]
+            try:
+                rows.append(future.result())
+            except Exception as exc:
+                cell_result_path = out / "cell_results" / f"{cell['run_label']}.json"
+                row = {
+                    "run_label": cell["run_label"],
+                    "domain": cell["domain"],
+                    "strategy_id": cell["strategy_id"],
+                    "returncode": 1,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "artifacts": _cell_artifacts(cell, repo, out),
+                    "metrics": None,
+                }
+                write_json(cell_result_path, row)
+                rows.append(row)
     return rows
 
 

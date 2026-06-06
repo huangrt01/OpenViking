@@ -1262,6 +1262,7 @@ def _run_failed_task_retries(
     max_attempts = int(args.failed_task_retry_count or 0)
     summary: dict[str, Any] = {
         "enabled": max_attempts > 0,
+        "status": "running" if max_attempts > 0 else "disabled",
         "max_attempts": max_attempts,
         "outcome_mode": args.failed_task_retry_outcome_mode,
         "attempts": [],
@@ -1282,39 +1283,76 @@ def _run_failed_task_retries(
             break
         task_ids = _ordered_task_ids(failed_sims)
         before_metrics = _metrics_from_data(current_data)
-        committed_feedback = _commit_retry_feedback_sessions(
-            args,
-            failed_sims,
-            attempt_index=attempt_index,
-        )
         retry_results = args.run_dir / f"{args.run_label}.retry{attempt_index}.json"
-        setattr(args, "eval_attempt_index", attempt_index)
-        _run_tau2(
-            tau2_repo=args.tau2_repo,
-            domain=args.domain,
-            split=args.eval_split_name,
-            task_ids=task_ids,
-            num_tasks=None,
-            trials=1,
-            max_steps=args.max_steps,
-            max_concurrency=min(max(1, args.max_concurrency), max(1, len(task_ids))),
-            agent=AGENT_NAME,
-            user=user_name,
-            agent_llm=args.agent_llm,
-            user_llm=args.user_llm,
-            agent_llm_args=args.agent_llm_args,
-            user_llm_args=args.user_llm_args,
-            seed=args.seed,
-            save_to=retry_results,
-        )
-        retry_data = json.loads(retry_results.read_text(encoding="utf-8"))
-        assert_tau2_results_complete(
-            retry_data,
-            context=f"{args.domain} eval retry attempt {attempt_index}",
-        )
+        committed_feedback: list[dict[str, Any]] = []
+        try:
+            committed_feedback = _commit_retry_feedback_sessions(
+                args,
+                failed_sims,
+                attempt_index=attempt_index,
+            )
+            setattr(args, "eval_attempt_index", attempt_index)
+            _run_tau2(
+                tau2_repo=args.tau2_repo,
+                domain=args.domain,
+                split=args.eval_split_name,
+                task_ids=task_ids,
+                num_tasks=None,
+                trials=1,
+                max_steps=args.max_steps,
+                max_concurrency=min(max(1, args.max_concurrency), max(1, len(task_ids))),
+                agent=AGENT_NAME,
+                user=user_name,
+                agent_llm=args.agent_llm,
+                user_llm=args.user_llm,
+                agent_llm_args=args.agent_llm_args,
+                user_llm_args=args.user_llm_args,
+                seed=args.seed,
+                save_to=retry_results,
+            )
+            retry_data = json.loads(retry_results.read_text(encoding="utf-8"))
+            assert_tau2_results_complete(
+                retry_data,
+                context=f"{args.domain} eval retry attempt {attempt_index}",
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            summary["status"] = "failed"
+            summary["error"] = error
+            summary["failed_attempt_index"] = attempt_index
+            summary["attempts"].append(
+                {
+                    "attempt_index": attempt_index,
+                    "status": "failed",
+                    "failed_before_count": len(failed_sims),
+                    "failed_task_ids": task_ids,
+                    "committed_feedback_sessions": committed_feedback,
+                    "retry_results": str(retry_results),
+                    "metrics_before": before_metrics,
+                    "error": error,
+                }
+            )
+            setattr(args, "eval_attempt_index", 0)
+            current_data["openviking_failed_task_retry"] = {
+                "status": "failed",
+                "error": error,
+                "failed_attempt_index": attempt_index,
+                "max_attempts": max_attempts,
+                "outcome_mode": args.failed_task_retry_outcome_mode,
+                "attempt_count": len(summary["attempts"]),
+                "initial_results": str(initial_results),
+            }
+            _write_json(eval_results, current_data)
+            summary["final_metrics"] = _metrics_from_data(current_data)
+            summary["failed_after_count"] = len(_failed_simulations(current_data))
+            summary["retrieval_trace_summary_after_retries"] = _retrieval_trace_summary(
+                trace_path
+            )
+            return summary
         current_data, replaced = _replace_simulations_with_retry(current_data, retry_data)
         attempt_row = {
             "attempt_index": attempt_index,
+            "status": "completed",
             "failed_before_count": len(failed_sims),
             "failed_task_ids": task_ids,
             "committed_feedback_sessions": committed_feedback,
@@ -1326,7 +1364,9 @@ def _run_failed_task_retries(
         summary["attempts"].append(attempt_row)
 
     setattr(args, "eval_attempt_index", 0)
+    summary["status"] = "completed"
     current_data["openviking_failed_task_retry"] = {
+        "status": "completed",
         "max_attempts": max_attempts,
         "outcome_mode": args.failed_task_retry_outcome_mode,
         "attempt_count": len(summary["attempts"]),
@@ -2256,6 +2296,11 @@ def main() -> int:
         "effect_evidence": effect_evidence,
     }
     _write_json(summary_path, summary)
+    if failed_task_retry.get("status") == "failed":
+        raise RuntimeError(
+            "failed-task retry did not produce valid retry evidence: "
+            f"{failed_task_retry.get('error')}"
+        )
     _raise_if_invalid_effect_evidence(effect_evidence)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
