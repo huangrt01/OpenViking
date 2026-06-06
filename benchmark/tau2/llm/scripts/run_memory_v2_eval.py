@@ -273,6 +273,17 @@ def _metrics(results_path: Path) -> dict[str, Any]:
     }
 
 
+def _fill_retrieval_budget_defaults(args: argparse.Namespace) -> None:
+    if args.first_user_retrieval_top_k is None:
+        args.first_user_retrieval_top_k = args.retrieval_top_k
+    if args.first_user_inject_top_k is None:
+        args.first_user_inject_top_k = args.first_user_retrieval_top_k
+    if args.prewrite_retrieval_top_k is None:
+        args.prewrite_retrieval_top_k = args.retrieval_top_k
+    if args.prewrite_inject_top_k is None:
+        args.prewrite_inject_top_k = args.prewrite_retrieval_top_k
+
+
 def _tool_call_name(tool_call: Any) -> str:
     if isinstance(tool_call, dict):
         return str(tool_call.get("name") or tool_call.get("function", {}).get("name") or "")
@@ -1776,10 +1787,7 @@ def main() -> int:
     args.run_dir.mkdir(parents=True, exist_ok=True)
     corpus_dir = args.corpus_dir or args.run_dir
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    args.first_user_retrieval_top_k = args.first_user_retrieval_top_k or args.retrieval_top_k
-    args.first_user_inject_top_k = args.first_user_inject_top_k or args.first_user_retrieval_top_k
-    args.prewrite_retrieval_top_k = args.prewrite_retrieval_top_k or args.retrieval_top_k
-    args.prewrite_inject_top_k = args.prewrite_inject_top_k or args.prewrite_retrieval_top_k
+    _fill_retrieval_budget_defaults(args)
     args.first_user_memory_inject_max_chars = (
         args.first_user_memory_inject_max_chars
         if args.first_user_memory_inject_max_chars is not None

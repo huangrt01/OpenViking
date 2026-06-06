@@ -8,7 +8,7 @@ strategies:
     label: TAU-2 no-memory same-seed baseline
     memory_backend: none
 
-  - id: failure_exp_comparative_prewrite_action_gate_top4_prewrite_top2
+  - id: failure_exp_comparative_prewrite_action_gate_top2
     label: Comparative-insight pre-write action-overlap gate
     memory_backend: openviking
     train_required: true
@@ -20,12 +20,10 @@ strategies:
     train_skip_failed_sessions: false
     agent_experience_failure_integration_mode: comparative_insight
     search_memory_type: experiences
-    retrieval_mode: first_user_prewrite
+    retrieval_mode: prewrite
     memory_constructor_mode: boundary_overlay
     memory_applicability_gate_mode: prewrite_action_overlap
-    retrieval_top_k: 4
-    first_user_retrieval_top_k: 4
-    first_user_inject_top_k: 0
+    retrieval_top_k: 2
     prewrite_retrieval_top_k: 2
     prewrite_inject_top_k: 2
     scope_prompt_file: benchmark/tau2/llm/config/scope_prompts/generic_memory_scope.md

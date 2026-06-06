@@ -348,6 +348,24 @@ def test_effect_evidence_gate_accepts_matched_injected_retrieval(tmp_path):
     module._raise_if_invalid_effect_evidence(evidence)
 
 
+def test_retrieval_budget_defaults_preserve_explicit_zero_inject_limit():
+    module = _load_runner_module()
+    args = SimpleNamespace(
+        retrieval_top_k=4,
+        first_user_retrieval_top_k=None,
+        first_user_inject_top_k=0,
+        prewrite_retrieval_top_k=None,
+        prewrite_inject_top_k=None,
+    )
+
+    module._fill_retrieval_budget_defaults(args)
+
+    assert args.first_user_retrieval_top_k == 4
+    assert args.first_user_inject_top_k == 0
+    assert args.prewrite_retrieval_top_k == 4
+    assert args.prewrite_inject_top_k == 4
+
+
 def test_boundary_overlay_constructor_keeps_situation_and_reflect_only():
     module = _load_runner_module()
 
