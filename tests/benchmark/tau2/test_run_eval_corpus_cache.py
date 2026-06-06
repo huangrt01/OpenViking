@@ -261,22 +261,20 @@ def test_memory_applicability_gate_mode_defaults_and_validates():
     assert run_eval._memory_applicability_gate_mode({"openviking": {}}, {}) == "none"
     assert (
         run_eval._memory_applicability_gate_mode(
-            {"openviking": {"memory_applicability_gate_mode": "prewrite_action_overlap"}},
+            {"openviking": {"memory_applicability_gate_mode": "none"}},
             {},
         )
-        == "prewrite_action_overlap"
-    )
-    assert (
-        run_eval._memory_applicability_gate_mode(
-            {"openviking": {"memory_applicability_gate_mode": "none"}},
-            {"memory_applicability_gate_mode": "prewrite_action_overlap"},
-        )
-        == "prewrite_action_overlap"
+        == "none"
     )
     with pytest.raises(ValueError, match="memory_applicability_gate_mode"):
         run_eval._memory_applicability_gate_mode(
             {"openviking": {}},
             {"memory_applicability_gate_mode": "unknown"},
+        )
+    with pytest.raises(ValueError, match="memory_applicability_gate_mode"):
+        run_eval._memory_applicability_gate_mode(
+            {"openviking": {"memory_applicability_gate_mode": "prewrite_action_overlap"}},
+            {},
         )
 
 
@@ -553,7 +551,6 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
         "train_memory_mode": "experience_only",
         "corpus_id": "c1",
         "memory_constructor_mode": "boundary_overlay",
-        "memory_applicability_gate_mode": "prewrite_action_overlap",
         "train_outcome_mode": "reward_info",
         "failed_task_retry_count": 2,
         "failed_task_retry_outcome_mode": "reward_info",
@@ -577,7 +574,7 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     index = command.index("--memory-constructor-mode")
     assert command[index + 1] == "boundary_overlay"
     index = command.index("--memory-applicability-gate-mode")
-    assert command[index + 1] == "prewrite_action_overlap"
+    assert command[index + 1] == "none"
     index = command.index("--train-outcome-mode")
     assert command[index + 1] == "reward_info"
     index = command.index("--failed-task-retry-count")

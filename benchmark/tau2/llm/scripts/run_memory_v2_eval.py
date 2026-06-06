@@ -45,16 +45,8 @@ TRAIN_OUTCOME_REWARD_INFO = "reward_info"
 MEMORY_CONSTRUCTOR_FULL = "full"
 MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY = "boundary_overlay"
 MEMORY_APPLICABILITY_GATE_NONE = "none"
-MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP = "prewrite_action_overlap"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
 TRACE_MEMORY_TEXT_PREVIEW_CHARS = 360
-GENERIC_APPLICABILITY_TOKENS = {
-    "id",
-    "modify",
-    "reservation",
-    "update",
-    "user",
-}
 
 
 def _json(text: str) -> dict[str, Any]:
@@ -390,113 +382,6 @@ def _tool_call_query(tool_calls: list[Any], state_messages: list[Any]) -> str:
     return "\n".join(parts)
 
 
-def _normalize_applicability_token(token: str) -> str:
-    token = token.lower().strip("_- ")
-    if not token:
-        return ""
-    if token.startswith("cancel"):
-        return "cancel"
-    if token.startswith("book"):
-        return "book"
-    if token.startswith("modif"):
-        return "modify"
-    singulars = {
-        "baggages": "baggage",
-        "flights": "flight",
-        "passengers": "passenger",
-    }
-    if token in singulars:
-        return singulars[token]
-    if len(token) > 4 and token.endswith("s"):
-        return token[:-1]
-    return token
-
-
-def _applicability_tokens_from_text(text: str) -> set[str]:
-    return {
-        normalized
-        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_]*", text)
-        for part in raw.split("_")
-        if (normalized := _normalize_applicability_token(part))
-    }
-
-
-def _applicability_tokens_from_tool_calls(tool_calls: list[Any]) -> list[str]:
-    tokens: set[str] = set()
-
-    def add_from_value(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                tokens.update(_applicability_tokens_from_text(str(key)))
-                add_from_value(child)
-        elif isinstance(value, list):
-            for child in value:
-                add_from_value(child)
-
-    for call in tool_calls:
-        tokens.update(_applicability_tokens_from_text(_tool_call_name(call)))
-        add_from_value(_tool_call_arguments(call))
-    return sorted(tokens - GENERIC_APPLICABILITY_TOKENS)
-
-
-def _action_signatures_from_tool_calls(tool_calls: list[Any]) -> list[str]:
-    signatures: set[str] = set()
-    for call in tool_calls:
-        name = _tool_call_name(call).lower()
-        if name.startswith("book_reservation"):
-            signatures.add("book")
-        elif name.startswith("cancel_reservation"):
-            signatures.add("cancel")
-        elif "baggage" in name:
-            signatures.add("baggage_update")
-        elif "passenger" in name:
-            signatures.add("passenger_update")
-        elif "insurance" in name:
-            signatures.add("insurance_update")
-        elif "payment" in name or "refund" in name:
-            signatures.add("payment_update")
-        elif "flight" in name or "cabin" in name:
-            signatures.add("flight_update")
-    if signatures:
-        return sorted(signatures)
-    return _applicability_tokens_from_tool_calls(tool_calls)
-
-
-def _memory_action_cues(text: str, uri: str) -> list[str]:
-    memory_name = uri.rsplit("/", 1)[-1].removesuffix(".md").replace("-", "_")
-    tokens = _applicability_tokens_from_text(f"{memory_name}\n{text}")
-    cues: set[str] = set()
-    has_booking = bool(tokens & {"book", "booking"})
-    has_cancel = bool(tokens & {"cancel"})
-    if has_booking:
-        cues.add("book")
-    if has_cancel:
-        cues.add("cancel")
-    if tokens & {"baggage", "bag", "checked"}:
-        cues.add("baggage_update")
-    if tokens & {"dob", "name", "passenger", "traveler"}:
-        cues.add("passenger_update")
-    if "insurance" in tokens:
-        cues.add("insurance_update")
-    if tokens & {"card", "certificate", "gift", "payment", "refund"}:
-        cues.add("payment_update")
-
-    flight_specific = tokens & {
-        "cabin",
-        "direct",
-        "destination",
-        "flight",
-        "nonstop",
-        "origin",
-        "route",
-        "segment",
-    }
-    modification_specific = tokens & {"change", "modify", "switch"}
-    if flight_specific and (modification_specific or not (has_booking or has_cancel)):
-        cues.add("flight_update")
-    return sorted(cues)
-
-
 def _memory_applicability_gate(
     text: str,
     *,
@@ -513,31 +398,8 @@ def _memory_applicability_gate(
         "applicability_gate_action_tokens": [],
         "applicability_gate_overlap_tokens": [],
     }
-    if mode == MEMORY_APPLICABILITY_GATE_NONE:
-        return trace
-    if mode != MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP:
+    if mode != MEMORY_APPLICABILITY_GATE_NONE:
         raise ValueError(f"Unsupported memory applicability gate mode: {mode}")
-    if decision_node != "before_write_tool_call":
-        trace["applicability_gate_reason"] = "non_prewrite_node"
-        return trace
-
-    action_tokens = _action_signatures_from_tool_calls(tool_calls or [])
-    trace["applicability_gate_applied"] = True
-    trace["applicability_gate_action_tokens"] = action_tokens
-    if not action_tokens:
-        trace["applicability_gate_reason"] = "no_action_tokens"
-        return trace
-
-    memory_cues = _memory_action_cues(text, uri)
-    overlap = sorted(set(action_tokens) & set(memory_cues))
-    trace["applicability_gate_memory_cues"] = memory_cues
-    trace["applicability_gate_overlap_tokens"] = overlap
-    if overlap:
-        trace["applicability_gate_reason"] = "action_token_overlap"
-        return trace
-
-    trace["applicability_gate_passed"] = False
-    trace["applicability_gate_reason"] = "no_action_token_overlap"
     return trace
 
 
@@ -2000,15 +1862,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--memory-applicability-gate-mode",
-        choices=[
-            MEMORY_APPLICABILITY_GATE_NONE,
-            MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
-        ],
+        choices=[MEMORY_APPLICABILITY_GATE_NONE],
         default=MEMORY_APPLICABILITY_GATE_NONE,
         help=(
-            "Optional diagnostic gate applied after retrieval and rendering. "
-            "prewrite_action_overlap only injects pre-write memories whose text "
-            "overlaps with tokens from the pending write-like tool call."
+            "Reserved for future generic applicability gates. Currently only "
+            "none is supported."
         ),
     )
     parser.add_argument("--fixed-first-user-file", type=Path)

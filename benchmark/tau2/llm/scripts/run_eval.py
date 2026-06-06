@@ -232,11 +232,8 @@ def _memory_applicability_gate_mode(config: dict[str, Any], strategy: dict[str, 
     if raw is None:
         raw = config.get("openviking", {}).get("memory_applicability_gate_mode", "none")
     mode = str(raw or "none")
-    if mode not in {"none", "prewrite_action_overlap"}:
-        raise ValueError(
-            "memory_applicability_gate_mode must be one of "
-            f"none, prewrite_action_overlap; got {mode!r}"
-        )
+    if mode != "none":
+        raise ValueError("memory_applicability_gate_mode only supports none")
     return mode
 
 
