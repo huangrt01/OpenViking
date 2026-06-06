@@ -196,3 +196,79 @@ def test_prepare_memory_corpus_validates_outcome_mode_and_train_results_hash(tmp
     mismatched_train = dict(cell, train_results_file=str(changed_train_results))
     with pytest.raises(RuntimeError, match="train_results_sha256 mismatch"):
         run_eval._prepare_memory_corpus(mismatched_train, tmp_path, tmp_path / "out3")
+
+
+def test_memory_constructor_mode_defaults_and_validates():
+    run_eval = _load_run_eval()
+
+    assert run_eval._memory_constructor_mode({"openviking": {}}, {}) == "full"
+    assert (
+        run_eval._memory_constructor_mode(
+            {"openviking": {"memory_constructor_mode": "boundary_overlay"}},
+            {},
+        )
+        == "boundary_overlay"
+    )
+    assert (
+        run_eval._memory_constructor_mode(
+            {"openviking": {"memory_constructor_mode": "full"}},
+            {"memory_constructor_mode": "boundary_overlay"},
+        )
+        == "boundary_overlay"
+    )
+    with pytest.raises(ValueError, match="memory_constructor_mode"):
+        run_eval._memory_constructor_mode(
+            {"openviking": {}},
+            {"memory_constructor_mode": "unknown"},
+        )
+
+
+def test_tau2_command_passes_memory_constructor_mode(tmp_path):
+    run_eval = _load_run_eval()
+    config = {
+        "benchmark": {
+            "train_split_name": "train",
+            "eval_split_name": "test",
+            "max_steps": 200,
+            "task_max_concurrency": 1,
+        },
+        "model": {
+            "agent_llm": "agent-model",
+            "user_llm": "user-model",
+        },
+        "openviking": {
+            "url": "http://127.0.0.1:9999",
+            "account": "acct",
+            "timeout_seconds": 600,
+            "wait_timeout_seconds": 600,
+            "reuse_corpus_across_runs": True,
+        },
+        "paths": {
+            "tau2_repo": str(tmp_path / "tau2"),
+            "output_dir": str(tmp_path / "result"),
+            "corpus_cache_dir": str(tmp_path / "corpora"),
+        },
+    }
+    strategy = {
+        "id": "s1",
+        "memory_backend": "openviking",
+        "train_memory_mode": "experience_only",
+        "corpus_id": "c1",
+        "memory_constructor_mode": "boundary_overlay",
+    }
+
+    command = run_eval._tau2_command(
+        config,
+        domain="airline",
+        strategy=strategy,
+        configured_run_id="run1",
+        run_label="cell1",
+        task_ids=None,
+        num_tasks=1,
+        train_num_tasks=None,
+        seed=300,
+    )
+
+    assert command is not None
+    index = command.index("--memory-constructor-mode")
+    assert command[index + 1] == "boundary_overlay"

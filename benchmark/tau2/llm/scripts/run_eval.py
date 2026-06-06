@@ -205,6 +205,18 @@ def _retrieval_budget(config: dict[str, Any], strategy: dict[str, Any]) -> dict[
     }
 
 
+def _memory_constructor_mode(config: dict[str, Any], strategy: dict[str, Any]) -> str:
+    raw = strategy.get("memory_constructor_mode")
+    if raw is None:
+        raw = config.get("openviking", {}).get("memory_constructor_mode", "full")
+    mode = str(raw or "full")
+    if mode not in {"full", "boundary_overlay"}:
+        raise ValueError(
+            f"memory_constructor_mode must be one of full, boundary_overlay; got {mode!r}"
+        )
+    return mode
+
+
 def _memory_corpus_key_for(
     *,
     domain: str,
@@ -444,6 +456,8 @@ def _tau2_command(
             str(budget["prewrite_inject_top_k"]),
             "--retrieval-mode",
             str(strategy.get("retrieval_mode", "first_user")),
+            "--memory-constructor-mode",
+            _memory_constructor_mode(config, strategy),
             "--train-transcript-format",
             _train_transcript_format(strategy),
             "--train-tool-output-max-chars",
@@ -705,6 +719,7 @@ def _build_plan(
                         ),
                         "train_skip_failed_sessions": _train_skip_failed_sessions(strategy),
                         "train_tool_output_max_chars": _train_tool_output_max_chars(strategy),
+                        "memory_constructor_mode": _memory_constructor_mode(config, strategy),
                         "retrieval_budget": _retrieval_budget(config, strategy),
                         "corpus_session_commit_concurrency": _corpus_session_commit_concurrency(
                             config

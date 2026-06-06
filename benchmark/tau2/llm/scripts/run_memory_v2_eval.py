@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,8 @@ TRAIN_TRANSCRIPT_ROLE_TOOL_BLOCKS = "role_tool_blocks"
 TRAIN_TRANSCRIPT_CUSTOM_LIKE = "custom_like"
 TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
 TRAIN_OUTCOME_LABEL_ONLY = "label_only"
+MEMORY_CONSTRUCTOR_FULL = "full"
+MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY = "boundary_overlay"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
 
 
@@ -798,6 +801,44 @@ def _retrieval_trace_summary(trace_path: Path) -> dict[str, Any]:
     }
 
 
+def _extract_markdown_sections(text: str) -> dict[str, str]:
+    matches = list(re.finditer(r"^##\s+([^\n#]+?)\s*$", text, flags=re.MULTILINE))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        heading = re.sub(r"\s+", " ", match.group(1).strip()).lower()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[heading] = text[start:end].strip()
+    return sections
+
+
+def _construct_memory_text(text: str, mode: str) -> tuple[str, dict[str, Any]]:
+    clean_text = text.strip()
+    trace = {
+        "constructor_mode": mode,
+        "constructor_applied": False,
+        "constructor_sections": [],
+    }
+    if mode == MEMORY_CONSTRUCTOR_FULL or not clean_text:
+        return clean_text, trace
+    if mode != MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY:
+        raise ValueError(f"Unsupported memory constructor mode: {mode}")
+
+    sections = _extract_markdown_sections(clean_text)
+    selected: list[tuple[str, str]] = []
+    for heading in ("situation", "reflect"):
+        body = sections.get(heading, "").strip()
+        if body:
+            selected.append((heading.title(), body))
+    if not selected:
+        return clean_text, trace
+
+    constructed = "\n\n".join(f"## {heading}\n{body}" for heading, body in selected)
+    trace["constructor_applied"] = constructed != clean_text
+    trace["constructor_sections"] = [heading for heading, _ in selected]
+    return constructed, trace
+
+
 def _effect_evidence_summary(
     metrics: dict[str, Any], trace_summary: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1141,7 +1182,10 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 for index, match in enumerate(memories[:search_limit], 1):
                     uri = getattr(match, "uri", "")
                     text, read_error = _read_memory_text(client, match)
-                    clean_text = text.strip()
+                    clean_text, constructor_trace = _construct_memory_text(
+                        text,
+                        args.memory_constructor_mode,
+                    )
                     block_text = f"Memory {index} ({uri}):\n{clean_text}" if clean_text else ""
                     block_chars = len(block_text)
                     budget_used_before = injected_chars_used
@@ -1167,7 +1211,8 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                         "uri": uri,
                         "score": getattr(match, "score", None),
                         "level": getattr(match, "level", None),
-                        "text_chars": len(text),
+                        "raw_text_chars": len(text),
+                        "text_chars": len(clean_text),
                         "block_chars": block_chars,
                         "injected": injected,
                         "inject_max_chars": inject_max_chars,
@@ -1175,6 +1220,7 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                         "inject_budget_used_after": injected_chars_used,
                         "inject_budget_dropped": budget_dropped,
                         "inject_budget_truncated": truncated,
+                        **constructor_trace,
                     }
                     if budget_dropped:
                         row["skipped_reason"] = "inject_char_budget_exceeded"
@@ -1425,6 +1471,17 @@ def main() -> int:
     parser.add_argument("--memory-inject-max-chars", type=int)
     parser.add_argument("--first-user-memory-inject-max-chars", type=int)
     parser.add_argument("--prewrite-memory-inject-max-chars", type=int)
+    parser.add_argument(
+        "--memory-constructor-mode",
+        choices=[MEMORY_CONSTRUCTOR_FULL, MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY],
+        default=MEMORY_CONSTRUCTOR_FULL,
+        help=(
+            "How retrieved memory text is rendered before injection. "
+            "full preserves the original memory; boundary_overlay keeps only "
+            "Situation/Reflect sections when present, useful for diagnostic "
+            "applicability-boundary experiments."
+        ),
+    )
     parser.add_argument("--fixed-first-user-file", type=Path)
     parser.add_argument("--scope-prompt-file", type=Path)
     parser.add_argument(
@@ -1643,6 +1700,7 @@ def main() -> int:
         "strategy_id": args.strategy_id,
         "retrieval_mode": args.retrieval_mode,
         "retrieval": {
+            "memory_constructor_mode": args.memory_constructor_mode,
             "first_user_retrieval_top_k": args.first_user_retrieval_top_k,
             "first_user_inject_top_k": args.first_user_inject_top_k,
             "first_user_memory_inject_max_chars": args.first_user_memory_inject_max_chars,

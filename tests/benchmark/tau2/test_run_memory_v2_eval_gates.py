@@ -346,3 +346,42 @@ def test_effect_evidence_gate_accepts_matched_injected_retrieval(tmp_path):
 
     assert evidence["claim_valid"] is True
     module._raise_if_invalid_effect_evidence(evidence)
+
+
+def test_boundary_overlay_constructor_keeps_situation_and_reflect_only():
+    module = _load_runner_module()
+
+    constructed, trace = module._construct_memory_text(
+        """
+## Situation
+The user asks for a staged reservation update.
+
+## Approach
+Call the full modification procedure.
+
+## Reflect
+Do not collapse separately confirmed mutations into one tool call.
+""",
+        module.MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY,
+    )
+
+    assert "## Situation" in constructed
+    assert "staged reservation update" in constructed
+    assert "## Reflect" in constructed
+    assert "Do not collapse" in constructed
+    assert "## Approach" not in constructed
+    assert trace["constructor_applied"] is True
+    assert trace["constructor_sections"] == ["Situation", "Reflect"]
+
+
+def test_boundary_overlay_constructor_falls_back_when_sections_missing():
+    module = _load_runner_module()
+
+    constructed, trace = module._construct_memory_text(
+        "Plain memory without expected headings.",
+        module.MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY,
+    )
+
+    assert constructed == "Plain memory without expected headings."
+    assert trace["constructor_applied"] is False
+    assert trace["constructor_sections"] == []
