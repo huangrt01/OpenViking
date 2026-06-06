@@ -85,6 +85,11 @@ def _text_preview(text: str, max_chars: int = TRACE_MEMORY_TEXT_PREVIEW_CHARS) -
     return compact[: max(0, max_chars - 3)].rstrip() + "..."
 
 
+def _task_trace_id(task: Any | None) -> str | None:
+    task_id = str(getattr(task, "id", "") or "").strip()
+    return task_id or None
+
+
 def _session_id_component(value: Any, max_chars: int = 96) -> str:
     text = "" if value is None else str(value).strip()
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("._-") or "unknown"
@@ -1571,6 +1576,23 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
         scope_prompt = args.scope_prompt_file.read_text(encoding="utf-8").strip()
 
     class OpenVikingMemoryAgent(LLMAgent):
+        def __init__(
+            self,
+            *,
+            task: Any | None = None,
+            tools: list[Any],
+            domain_policy: str,
+            llm: str,
+            llm_args: dict[str, Any] | None = None,
+        ):
+            super().__init__(
+                tools=tools,
+                domain_policy=domain_policy,
+                llm=llm,
+                llm_args=llm_args,
+            )
+            self._trace_task_id = _task_trace_id(task)
+
         def get_init_state(self, message_history=None):
             state = super().get_init_state(message_history)
             if scope_prompt:
@@ -1677,6 +1699,7 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 "domain": args.domain,
                 "eval_split_name": args.eval_split_name,
                 "seed": args.seed,
+                "task_id": self._trace_task_id,
                 **event,
             }
             with trace_path.open("a", encoding="utf-8") as handle:
@@ -1856,6 +1879,7 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 domain_policy=domain_policy,
                 llm=kwargs.get("llm"),
                 llm_args=kwargs.get("llm_args"),
+                task=kwargs.get("task"),
             )
 
         if hasattr(registry, "register_agent"):

@@ -471,6 +471,15 @@ def test_session_id_component_is_stable_and_bounded():
     assert component == module._session_id_component(value, max_chars=40)
 
 
+def test_task_trace_id_preserves_tau2_task_identity():
+    module = _load_runner_module()
+
+    assert module._task_trace_id(SimpleNamespace(id="32")) == "32"
+    assert module._task_trace_id(SimpleNamespace(id="  task-A  ")) == "task-A"
+    assert module._task_trace_id(SimpleNamespace(id="")) is None
+    assert module._task_trace_id(None) is None
+
+
 def test_retrieval_budget_defaults_preserve_explicit_zero_inject_limit():
     module = _load_runner_module()
     args = SimpleNamespace(
