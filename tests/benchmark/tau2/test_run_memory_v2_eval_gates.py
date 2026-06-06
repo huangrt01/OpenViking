@@ -385,3 +385,84 @@ def test_boundary_overlay_constructor_falls_back_when_sections_missing():
     assert constructed == "Plain memory without expected headings."
     assert trace["constructor_applied"] is False
     assert trace["constructor_sections"] == []
+
+
+def test_prewrite_action_overlap_gate_passes_matching_memory():
+    module = _load_runner_module()
+
+    trace = module._memory_applicability_gate(
+        "## Reflect\nValidate the requested direct flight before changing the reservation.",
+        uri="viking://user/example/memories/experiences/flight_nonstop_modification_check.md",
+        mode=module.MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
+        decision_node="before_write_tool_call",
+        tool_calls=[
+            {
+                "name": "update_reservation_flights",
+                "arguments": {"flights": [{"flight_number": "HAT041"}]},
+            }
+        ],
+    )
+
+    assert trace["applicability_gate_applied"] is True
+    assert trace["applicability_gate_passed"] is True
+    assert trace["applicability_gate_reason"] == "action_token_overlap"
+    assert "flight_update" in trace["applicability_gate_overlap_tokens"]
+
+
+def test_prewrite_action_overlap_gate_filters_non_matching_memory():
+    module = _load_runner_module()
+
+    trace = module._memory_applicability_gate(
+        "## Reflect\nDo not offer compensation before the user explicitly asks for it.",
+        uri="viking://user/example/memories/experiences/compensation_request_handoff.md",
+        mode=module.MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
+        decision_node="before_write_tool_call",
+        tool_calls=[
+            {
+                "name": "update_reservation_baggages",
+                "arguments": {"total_baggages": 2},
+            }
+        ],
+    )
+
+    assert trace["applicability_gate_applied"] is True
+    assert trace["applicability_gate_passed"] is False
+    assert trace["applicability_gate_reason"] == "no_action_token_overlap"
+    assert "baggage_update" in trace["applicability_gate_action_tokens"]
+
+
+def test_prewrite_action_overlap_gate_ignores_generic_flight_in_cancellation_memory():
+    module = _load_runner_module()
+
+    trace = module._memory_applicability_gate(
+        "## Situation\nThe user asks whether a flight cancellation is refundable.",
+        uri="viking://user/example/memories/experiences/flight_cancellation_eligibility_check.md",
+        mode=module.MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
+        decision_node="before_write_tool_call",
+        tool_calls=[
+            {
+                "name": "update_reservation_flights",
+                "arguments": {"flights": [{"flight_number": "HAT041"}]},
+            }
+        ],
+    )
+
+    assert trace["applicability_gate_passed"] is False
+    assert trace["applicability_gate_action_tokens"] == ["flight_update"]
+    assert "cancel" in trace["applicability_gate_memory_cues"]
+    assert "flight_update" not in trace["applicability_gate_memory_cues"]
+
+
+def test_prewrite_action_overlap_gate_does_not_filter_first_user():
+    module = _load_runner_module()
+
+    trace = module._memory_applicability_gate(
+        "Anything",
+        mode=module.MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
+        decision_node="first_user",
+        tool_calls=[],
+    )
+
+    assert trace["applicability_gate_applied"] is False
+    assert trace["applicability_gate_passed"] is True
+    assert trace["applicability_gate_reason"] == "non_prewrite_node"

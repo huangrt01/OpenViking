@@ -223,6 +223,31 @@ def test_memory_constructor_mode_defaults_and_validates():
         )
 
 
+def test_memory_applicability_gate_mode_defaults_and_validates():
+    run_eval = _load_run_eval()
+
+    assert run_eval._memory_applicability_gate_mode({"openviking": {}}, {}) == "none"
+    assert (
+        run_eval._memory_applicability_gate_mode(
+            {"openviking": {"memory_applicability_gate_mode": "prewrite_action_overlap"}},
+            {},
+        )
+        == "prewrite_action_overlap"
+    )
+    assert (
+        run_eval._memory_applicability_gate_mode(
+            {"openviking": {"memory_applicability_gate_mode": "none"}},
+            {"memory_applicability_gate_mode": "prewrite_action_overlap"},
+        )
+        == "prewrite_action_overlap"
+    )
+    with pytest.raises(ValueError, match="memory_applicability_gate_mode"):
+        run_eval._memory_applicability_gate_mode(
+            {"openviking": {}},
+            {"memory_applicability_gate_mode": "unknown"},
+        )
+
+
 def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     run_eval = _load_run_eval()
     config = {
@@ -255,6 +280,7 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
         "train_memory_mode": "experience_only",
         "corpus_id": "c1",
         "memory_constructor_mode": "boundary_overlay",
+        "memory_applicability_gate_mode": "prewrite_action_overlap",
     }
 
     command = run_eval._tau2_command(
@@ -272,3 +298,5 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     assert command is not None
     index = command.index("--memory-constructor-mode")
     assert command[index + 1] == "boundary_overlay"
+    index = command.index("--memory-applicability-gate-mode")
+    assert command[index + 1] == "prewrite_action_overlap"

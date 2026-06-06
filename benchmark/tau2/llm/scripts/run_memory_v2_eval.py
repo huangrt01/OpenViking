@@ -43,7 +43,16 @@ TRAIN_OUTCOME_TRANSCRIPT_ONLY = "transcript_only"
 TRAIN_OUTCOME_LABEL_ONLY = "label_only"
 MEMORY_CONSTRUCTOR_FULL = "full"
 MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY = "boundary_overlay"
+MEMORY_APPLICABILITY_GATE_NONE = "none"
+MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP = "prewrite_action_overlap"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
+GENERIC_APPLICABILITY_TOKENS = {
+    "id",
+    "modify",
+    "reservation",
+    "update",
+    "user",
+}
 
 
 def _json(text: str) -> dict[str, Any]:
@@ -308,6 +317,157 @@ def _tool_call_query(tool_calls: list[Any], state_messages: list[Any]) -> str:
     if recent_observations:
         parts.append("Recent tool observations: " + " | ".join(recent_observations[-4:]))
     return "\n".join(parts)
+
+
+def _normalize_applicability_token(token: str) -> str:
+    token = token.lower().strip("_- ")
+    if not token:
+        return ""
+    if token.startswith("cancel"):
+        return "cancel"
+    if token.startswith("book"):
+        return "book"
+    if token.startswith("modif"):
+        return "modify"
+    singulars = {
+        "baggages": "baggage",
+        "flights": "flight",
+        "passengers": "passenger",
+    }
+    if token in singulars:
+        return singulars[token]
+    if len(token) > 4 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _applicability_tokens_from_text(text: str) -> set[str]:
+    return {
+        normalized
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_]*", text)
+        for part in raw.split("_")
+        if (normalized := _normalize_applicability_token(part))
+    }
+
+
+def _applicability_tokens_from_tool_calls(tool_calls: list[Any]) -> list[str]:
+    tokens: set[str] = set()
+
+    def add_from_value(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                tokens.update(_applicability_tokens_from_text(str(key)))
+                add_from_value(child)
+        elif isinstance(value, list):
+            for child in value:
+                add_from_value(child)
+
+    for call in tool_calls:
+        tokens.update(_applicability_tokens_from_text(_tool_call_name(call)))
+        add_from_value(_tool_call_arguments(call))
+    return sorted(tokens - GENERIC_APPLICABILITY_TOKENS)
+
+
+def _action_signatures_from_tool_calls(tool_calls: list[Any]) -> list[str]:
+    signatures: set[str] = set()
+    for call in tool_calls:
+        name = _tool_call_name(call).lower()
+        if name.startswith("book_reservation"):
+            signatures.add("book")
+        elif name.startswith("cancel_reservation"):
+            signatures.add("cancel")
+        elif "baggage" in name:
+            signatures.add("baggage_update")
+        elif "passenger" in name:
+            signatures.add("passenger_update")
+        elif "insurance" in name:
+            signatures.add("insurance_update")
+        elif "payment" in name or "refund" in name:
+            signatures.add("payment_update")
+        elif "flight" in name or "cabin" in name:
+            signatures.add("flight_update")
+    if signatures:
+        return sorted(signatures)
+    return _applicability_tokens_from_tool_calls(tool_calls)
+
+
+def _memory_action_cues(text: str, uri: str) -> list[str]:
+    memory_name = uri.rsplit("/", 1)[-1].removesuffix(".md").replace("-", "_")
+    tokens = _applicability_tokens_from_text(f"{memory_name}\n{text}")
+    cues: set[str] = set()
+    has_booking = bool(tokens & {"book", "booking"})
+    has_cancel = bool(tokens & {"cancel"})
+    if has_booking:
+        cues.add("book")
+    if has_cancel:
+        cues.add("cancel")
+    if tokens & {"baggage", "bag", "checked"}:
+        cues.add("baggage_update")
+    if tokens & {"dob", "name", "passenger", "traveler"}:
+        cues.add("passenger_update")
+    if "insurance" in tokens:
+        cues.add("insurance_update")
+    if tokens & {"card", "certificate", "gift", "payment", "refund"}:
+        cues.add("payment_update")
+
+    flight_specific = tokens & {
+        "cabin",
+        "direct",
+        "destination",
+        "flight",
+        "nonstop",
+        "origin",
+        "route",
+        "segment",
+    }
+    modification_specific = tokens & {"change", "modify", "switch"}
+    if flight_specific and (modification_specific or not (has_booking or has_cancel)):
+        cues.add("flight_update")
+    return sorted(cues)
+
+
+def _memory_applicability_gate(
+    text: str,
+    *,
+    uri: str = "",
+    mode: str,
+    decision_node: str,
+    tool_calls: list[Any] | None = None,
+) -> dict[str, Any]:
+    trace = {
+        "applicability_gate_mode": mode,
+        "applicability_gate_applied": False,
+        "applicability_gate_passed": True,
+        "applicability_gate_reason": "not_configured",
+        "applicability_gate_action_tokens": [],
+        "applicability_gate_overlap_tokens": [],
+    }
+    if mode == MEMORY_APPLICABILITY_GATE_NONE:
+        return trace
+    if mode != MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP:
+        raise ValueError(f"Unsupported memory applicability gate mode: {mode}")
+    if decision_node != "before_write_tool_call":
+        trace["applicability_gate_reason"] = "non_prewrite_node"
+        return trace
+
+    action_tokens = _action_signatures_from_tool_calls(tool_calls or [])
+    trace["applicability_gate_applied"] = True
+    trace["applicability_gate_action_tokens"] = action_tokens
+    if not action_tokens:
+        trace["applicability_gate_reason"] = "no_action_tokens"
+        return trace
+
+    memory_cues = _memory_action_cues(text, uri)
+    overlap = sorted(set(action_tokens) & set(memory_cues))
+    trace["applicability_gate_memory_cues"] = memory_cues
+    trace["applicability_gate_overlap_tokens"] = overlap
+    if overlap:
+        trace["applicability_gate_reason"] = "action_token_overlap"
+        return trace
+
+    trace["applicability_gate_passed"] = False
+    trace["applicability_gate_reason"] = "no_action_token_overlap"
+    return trace
 
 
 def _tool_call_id(tool_call: dict[str, Any]) -> str:
@@ -1168,9 +1328,11 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
             self,
             query: str,
             *,
+            decision_node: str,
             search_limit: int,
             inject_limit: int,
             inject_max_chars: int | None = None,
+            tool_calls: list[Any] | None = None,
         ) -> tuple[str, list[dict[str, Any]]]:
             client = _client(args)
             rows: list[dict[str, Any]] = []
@@ -1186,12 +1348,22 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                         text,
                         args.memory_constructor_mode,
                     )
+                    applicability_trace = _memory_applicability_gate(
+                        clean_text,
+                        uri=uri,
+                        mode=args.memory_applicability_gate_mode,
+                        decision_node=decision_node,
+                        tool_calls=tool_calls,
+                    )
                     block_text = f"Memory {index} ({uri}):\n{clean_text}" if clean_text else ""
                     block_chars = len(block_text)
                     budget_used_before = injected_chars_used
                     budget_dropped = False
                     truncated = False
-                    injected = index <= inject_limit and bool(block_text)
+                    applicability_rejected = not applicability_trace["applicability_gate_passed"]
+                    injected = (
+                        index <= inject_limit and bool(block_text) and not applicability_rejected
+                    )
                     if injected and inject_max_chars is not None:
                         remaining = inject_max_chars - injected_chars_used
                         if remaining <= 0:
@@ -1221,7 +1393,10 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                         "inject_budget_dropped": budget_dropped,
                         "inject_budget_truncated": truncated,
                         **constructor_trace,
+                        **applicability_trace,
                     }
+                    if applicability_rejected:
+                        row["skipped_reason"] = "applicability_gate_filtered"
                     if budget_dropped:
                         row["skipped_reason"] = "inject_char_budget_exceeded"
                     if read_error:
@@ -1328,6 +1503,7 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 query = str(getattr(message, "content", "") or "")
                 block, matches = self._retrieve(
                     query,
+                    decision_node="first_user",
                     search_limit=args.first_user_retrieval_top_k,
                     inject_limit=args.first_user_inject_top_k,
                     inject_max_chars=args.first_user_memory_inject_max_chars,
@@ -1360,9 +1536,11 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                     query = _tool_call_query(write_calls, state.messages)
                     block, matches = self._retrieve(
                         query,
+                        decision_node="before_write_tool_call",
                         search_limit=args.prewrite_retrieval_top_k,
                         inject_limit=args.prewrite_inject_top_k,
                         inject_max_chars=args.prewrite_memory_inject_max_chars,
+                        tool_calls=write_calls,
                     )
                     self._trace(
                         {
@@ -1480,6 +1658,19 @@ def main() -> int:
             "full preserves the original memory; boundary_overlay keeps only "
             "Situation/Reflect sections when present, useful for diagnostic "
             "applicability-boundary experiments."
+        ),
+    )
+    parser.add_argument(
+        "--memory-applicability-gate-mode",
+        choices=[
+            MEMORY_APPLICABILITY_GATE_NONE,
+            MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP,
+        ],
+        default=MEMORY_APPLICABILITY_GATE_NONE,
+        help=(
+            "Optional diagnostic gate applied after retrieval and rendering. "
+            "prewrite_action_overlap only injects pre-write memories whose text "
+            "overlaps with tokens from the pending write-like tool call."
         ),
     )
     parser.add_argument("--fixed-first-user-file", type=Path)
@@ -1701,6 +1892,7 @@ def main() -> int:
         "retrieval_mode": args.retrieval_mode,
         "retrieval": {
             "memory_constructor_mode": args.memory_constructor_mode,
+            "memory_applicability_gate_mode": args.memory_applicability_gate_mode,
             "first_user_retrieval_top_k": args.first_user_retrieval_top_k,
             "first_user_inject_top_k": args.first_user_inject_top_k,
             "first_user_memory_inject_max_chars": args.first_user_memory_inject_max_chars,
