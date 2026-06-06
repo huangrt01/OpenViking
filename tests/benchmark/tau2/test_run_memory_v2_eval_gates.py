@@ -78,6 +78,16 @@ def test_memory_extract_skipped_from_task_reads_telemetry_summary():
     assert module._memory_extract_skipped_from_task({"telemetry": {}}) == 0
 
 
+def test_trace_text_preview_is_compact_and_hashed():
+    module = _load_runner_module()
+
+    text = "alpha\n\n  beta\tgamma"
+
+    assert module._text_preview(text) == "alpha beta gamma"
+    assert module._text_preview("0123456789", max_chars=6) == "012..."
+    assert module._text_sha256(text) == module.hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def test_corpus_provenance_records_train_config_and_git_identity(tmp_path, monkeypatch):
     module = _load_runner_module()
     train_results = tmp_path / "train_results.json"
@@ -406,6 +416,59 @@ def test_replace_simulations_with_retry_keeps_non_retried_tasks():
             "after_db_match": True,
         }
     ]
+
+
+def test_retry_feedback_session_ids_include_run_label(monkeypatch):
+    module = _load_runner_module()
+    committed_session_ids = []
+
+    def fake_commit(args, *, sim, session_id, outcome_mode, session_kind):
+        committed_session_ids.append(session_id)
+        return {
+            "session_id": session_id,
+            "task_id": sim["task_id"],
+            "outcome_mode": outcome_mode,
+            "session_kind": session_kind,
+        }
+
+    monkeypatch.setattr(module, "_commit_simulation_session", fake_commit)
+    sim = {"task_id": "29", "trial": 0, "reward_info": {"reward": 0.0}}
+
+    module._commit_retry_feedback_sessions(
+        SimpleNamespace(
+            domain="airline",
+            run_label="run one/with spaces",
+            failed_task_retry_outcome_mode=module.TRAIN_OUTCOME_REWARD_INFO,
+        ),
+        [sim],
+        attempt_index=1,
+    )
+    module._commit_retry_feedback_sessions(
+        SimpleNamespace(
+            domain="airline",
+            run_label="run-two",
+            failed_task_retry_outcome_mode=module.TRAIN_OUTCOME_REWARD_INFO,
+        ),
+        [sim],
+        attempt_index=1,
+    )
+
+    assert len(committed_session_ids) == 2
+    assert committed_session_ids[0] != committed_session_ids[1]
+    assert "run-one-with-spaces" in committed_session_ids[0]
+    assert committed_session_ids[0].endswith("-29-trial-0-attempt-1")
+    assert committed_session_ids[1].endswith("-29-trial-0-attempt-1")
+
+
+def test_session_id_component_is_stable_and_bounded():
+    module = _load_runner_module()
+    value = "bad chars / " + ("x" * 200)
+
+    component = module._session_id_component(value, max_chars=40)
+
+    assert len(component) <= 40
+    assert "/" not in component
+    assert component == module._session_id_component(value, max_chars=40)
 
 
 def test_retrieval_budget_defaults_preserve_explicit_zero_inject_limit():

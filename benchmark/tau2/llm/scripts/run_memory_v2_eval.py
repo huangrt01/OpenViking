@@ -47,6 +47,7 @@ MEMORY_CONSTRUCTOR_BOUNDARY_OVERLAY = "boundary_overlay"
 MEMORY_APPLICABILITY_GATE_NONE = "none"
 MEMORY_APPLICABILITY_GATE_PREWRITE_ACTION_OVERLAP = "prewrite_action_overlap"
 DEFAULT_TRAIN_TOOL_OUTPUT_MAX_CHARS = 5000
+TRACE_MEMORY_TEXT_PREVIEW_CHARS = 360
 GENERIC_APPLICABILITY_TOKENS = {
     "id",
     "modify",
@@ -71,6 +72,27 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _text_preview(text: str, max_chars: int = TRACE_MEMORY_TEXT_PREVIEW_CHARS) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _session_id_component(value: Any, max_chars: int = 96) -> str:
+    text = "" if value is None else str(value).strip()
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip("._-") or "unknown"
+    if len(safe) <= max_chars:
+        return safe
+    digest = hashlib.sha1(safe.encode("utf-8")).hexdigest()[:10]
+    prefix = safe[: max(1, max_chars - len(digest) - 1)].rstrip("._-") or "value"
+    return f"{prefix}-{digest}"
 
 
 def _git_head_commit(repo: Path) -> str | None:
@@ -1206,9 +1228,12 @@ def _commit_retry_feedback_sessions(
 ) -> list[dict[str, Any]]:
     committed: list[dict[str, Any]] = []
     for sim in failed_sims:
+        run_component = _session_id_component(args.run_label)
+        task_component = _session_id_component(sim.get("task_id"), max_chars=48)
+        trial_component = _session_id_component(sim.get("trial", 0), max_chars=24)
         session_id = (
-            f"tau2-{args.domain}-eval-retry-{sim.get('task_id')}"
-            f"-trial-{sim.get('trial', 0)}-attempt-{attempt_index}"
+            f"tau2-{args.domain}-eval-retry-{run_component}-{task_component}"
+            f"-trial-{trial_component}-attempt-{attempt_index}"
         )
         committed.append(
             _commit_simulation_session(
@@ -1617,8 +1642,12 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                         "level": getattr(match, "level", None),
                         "raw_text_chars": len(text),
                         "text_chars": len(clean_text),
+                        "memory_text_sha256": _text_sha256(clean_text) if clean_text else None,
+                        "memory_text_preview": _text_preview(clean_text) if clean_text else "",
                         "block_chars": block_chars,
                         "injected": injected,
+                        "injected_text_sha256": _text_sha256(block_text) if injected else None,
+                        "injected_text_preview": _text_preview(block_text) if injected else "",
                         "inject_max_chars": inject_max_chars,
                         "inject_budget_used_before": budget_used_before,
                         "inject_budget_used_after": injected_chars_used,
@@ -1641,6 +1670,15 @@ def _register_memory_agent(args: argparse.Namespace, trace_path: Path) -> None:
                 client.close()
 
         def _trace(self, event: dict[str, Any]) -> None:
+            event = {
+                "trace_schema_version": 2,
+                "run_label": args.run_label,
+                "strategy_id": args.strategy_id,
+                "domain": args.domain,
+                "eval_split_name": args.eval_split_name,
+                "seed": args.seed,
+                **event,
+            }
             with trace_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
