@@ -283,6 +283,122 @@ def test_train_outcome_and_failed_retry_modes_validate():
         run_eval._failed_task_retry_outcome_mode({"failed_task_retry_outcome_mode": "bad"})
 
 
+def test_memory_corpus_key_isolates_eval_memory_writes_by_repeat():
+    run_eval = _load_run_eval()
+    strategy = {"id": "s1", "corpus_id": "c1"}
+
+    assert (
+        run_eval._memory_corpus_key_for(
+            domain="airline",
+            strategy=strategy,
+            train_num_tasks=None,
+        )
+        == "airline_c1"
+    )
+    assert (
+        run_eval._memory_corpus_key_for(
+            domain="airline",
+            strategy=strategy,
+            train_num_tasks=3,
+            repeat_index=2,
+            repeat_isolated=True,
+        )
+        == "airline_c1_train3_r2"
+    )
+    with pytest.raises(ValueError, match="repeat_index"):
+        run_eval._memory_corpus_key_for(
+            domain="airline",
+            strategy=strategy,
+            train_num_tasks=None,
+            repeat_isolated=True,
+        )
+
+
+def test_run_plan_isolates_failed_retry_corpora_by_repeat(tmp_path):
+    run_eval = _load_run_eval()
+    config = {
+        "benchmark": {
+            "domains": ["airline"],
+            "train_split_name": "train",
+            "eval_split_name": "test",
+            "repeat_count": 2,
+            "seed": 300,
+            "max_steps": 200,
+            "task_max_concurrency": 1,
+        },
+        "eval": {
+            "require_fixed_first_user": False,
+            "user_simulator_policy": "official",
+        },
+        "model": {
+            "agent_llm": "agent-model",
+            "user_llm": "user-model",
+        },
+        "openviking": {
+            "url": "http://127.0.0.1:9999",
+            "account": "acct",
+            "timeout_seconds": 600,
+            "wait_timeout_seconds": 600,
+            "reuse_corpus_across_runs": True,
+        },
+        "paths": {
+            "tau2_repo": str(tmp_path / "tau2"),
+            "output_dir": str(tmp_path / "result"),
+            "corpus_cache_dir": str(tmp_path / "corpora"),
+        },
+        "strategies": [
+            {
+                "id": "memory_read_only",
+                "memory_backend": "openviking",
+                "train_memory_mode": "experience_only",
+                "corpus_id": "shared",
+            },
+            {
+                "id": "memory_retry",
+                "memory_backend": "openviking",
+                "train_memory_mode": "experience_only",
+                "corpus_id": "retry",
+                "failed_task_retry_count": 2,
+            },
+        ],
+    }
+
+    plan = run_eval._build_plan(
+        config,
+        "run1",
+        selected_domains=None,
+        selected_strategy_ids=None,
+        task_ids=None,
+        num_tasks=1,
+        train_num_tasks=None,
+        repeat_count_override=None,
+        cell_concurrency_override=None,
+        strategy_concurrency_override=None,
+    )
+
+    cells = {(cell["strategy_id"], cell["repeat_index"]): cell for cell in plan["cells"]}
+    read_r1 = cells[("memory_read_only", 1)]
+    read_r2 = cells[("memory_read_only", 2)]
+    retry_r1 = cells[("memory_retry", 1)]
+    retry_r2 = cells[("memory_retry", 2)]
+
+    assert read_r1["corpus_key"] == "airline_shared"
+    assert read_r2["corpus_key"] == "airline_shared"
+    assert read_r1["repeat_isolated_corpus"] is False
+    assert read_r2["repeat_isolated_corpus"] is False
+    assert retry_r1["corpus_key"] == "airline_retry_r1"
+    assert retry_r2["corpus_key"] == "airline_retry_r2"
+    assert retry_r1["eval_memory_writes"] is True
+    assert retry_r2["repeat_isolated_corpus"] is True
+
+    for cell in [read_r1, read_r2, retry_r1, retry_r2]:
+        command = cell["command"]
+        corpus_dir_index = command.index("--corpus-dir")
+        account_index = command.index("--openviking-account")
+        assert command[corpus_dir_index + 1] == cell["corpus_dir"]
+        assert command[account_index + 1] == f"acct-{cell['corpus_key']}"
+
+
 def test_tau2_command_passes_memory_constructor_mode(tmp_path):
     run_eval = _load_run_eval()
     config = {
@@ -328,6 +444,7 @@ def test_tau2_command_passes_memory_constructor_mode(tmp_path):
         strategy=strategy,
         configured_run_id="run1",
         run_label="cell1",
+        repeat_index=1,
         task_ids=None,
         num_tasks=1,
         train_num_tasks=None,

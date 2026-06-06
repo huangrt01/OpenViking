@@ -237,6 +237,8 @@ def _memory_corpus_key_for(
     domain: str,
     strategy: dict[str, Any],
     train_num_tasks: int | None,
+    repeat_index: int | None = None,
+    repeat_isolated: bool = False,
 ) -> str:
     corpus_id = str(strategy.get("corpus_id") or strategy["id"])
     raw_key = strategy.get("corpus_cache_key")
@@ -250,6 +252,12 @@ def _memory_corpus_key_for(
         key = f"{domain}_{corpus_id}"
     if train_num_tasks is not None:
         key = f"{key}_train{train_num_tasks}"
+    if repeat_isolated:
+        if repeat_index is None or repeat_index < 1:
+            raise ValueError(
+                "repeat_index must be a positive 1-based integer when repeat isolation is enabled"
+            )
+        key = f"{key}_r{repeat_index}"
     return key
 
 
@@ -311,6 +319,16 @@ def _failed_task_retry_outcome_mode(strategy: dict[str, Any]) -> str:
             f"label_only, reward_info; got {mode!r}"
         )
     return mode
+
+
+def _eval_memory_writes_enabled(config: dict[str, Any], strategy: dict[str, Any]) -> bool:
+    return _failed_task_retry_count(config, strategy) > 0
+
+
+def _repeat_isolated_corpus_for_eval_writes(
+    config: dict[str, Any], strategy: dict[str, Any]
+) -> bool:
+    return _eval_memory_writes_enabled(config, strategy)
 
 
 def _train_results_file(
@@ -390,6 +408,7 @@ def _tau2_command(
     strategy: dict[str, Any],
     configured_run_id: str,
     run_label: str,
+    repeat_index: int,
     task_ids: list[str] | None,
     num_tasks: int | None,
     train_num_tasks: int | None,
@@ -421,6 +440,8 @@ def _tau2_command(
             domain=domain,
             strategy=strategy,
             train_num_tasks=resolved_train_num_tasks,
+            repeat_index=repeat_index,
+            repeat_isolated=_repeat_isolated_corpus_for_eval_writes(config, strategy),
         )
         corpus_dir = _memory_corpus_dir(config, configured_run_id, corpus_key)
         reuse_identity = _manifest_openviking_identity(corpus_dir)
@@ -703,14 +724,32 @@ def _build_plan(
         split_path = split_file(config, domain)
         for strategy in strategies:
             for repeat_index in range(repeat_count):
+                plan_repeat_index = repeat_index + 1
                 seed = base_seed + repeat_index
-                run_label = f"{configured_run_id}_{domain}_{strategy['id']}_r{repeat_index + 1}"
+                run_label = f"{configured_run_id}_{domain}_{strategy['id']}_r{plan_repeat_index}"
+                resolved_train_num_tasks = (
+                    train_num_tasks
+                    if train_num_tasks is not None
+                    else strategy.get("train_num_tasks")
+                )
+                eval_memory_writes = _eval_memory_writes_enabled(config, strategy)
+                repeat_isolated_corpus = _repeat_isolated_corpus_for_eval_writes(
+                    config, strategy
+                )
+                corpus_key = _memory_corpus_key_for(
+                    domain=domain,
+                    strategy=strategy,
+                    train_num_tasks=resolved_train_num_tasks,
+                    repeat_index=plan_repeat_index,
+                    repeat_isolated=repeat_isolated_corpus,
+                )
                 command = _tau2_command(
                     config,
                     domain=domain,
                     strategy=strategy,
                     configured_run_id=configured_run_id,
                     run_label=run_label,
+                    repeat_index=plan_repeat_index,
                     task_ids=task_ids,
                     num_tasks=num_tasks,
                     train_num_tasks=train_num_tasks,
@@ -735,28 +774,12 @@ def _build_plan(
                         "train_required": bool(strategy.get("train_required")),
                         "memory_backend": strategy.get("memory_backend"),
                         "corpus_id": strategy.get("corpus_id", strategy["id"]),
-                        "corpus_key": _memory_corpus_key_for(
-                            domain=domain,
-                            strategy=strategy,
-                            train_num_tasks=(
-                                train_num_tasks
-                                if train_num_tasks is not None
-                                else strategy.get("train_num_tasks")
-                            ),
-                        ),
+                        "corpus_key": corpus_key,
                         "corpus_dir": str(
                             _memory_corpus_dir(
                                 config,
                                 configured_run_id,
-                                _memory_corpus_key_for(
-                                    domain=domain,
-                                    strategy=strategy,
-                                    train_num_tasks=(
-                                        train_num_tasks
-                                        if train_num_tasks is not None
-                                        else strategy.get("train_num_tasks")
-                                    ),
-                                ),
+                                corpus_key,
                             )
                         ),
                         "retrieval_mode": strategy.get("retrieval_mode"),
@@ -780,6 +803,8 @@ def _build_plan(
                         "train_include_system_prompt": _enabled(
                             strategy.get("train_include_system_prompt")
                         ),
+                        "eval_memory_writes": eval_memory_writes,
+                        "repeat_isolated_corpus": repeat_isolated_corpus,
                         "train_skip_failed_sessions": _train_skip_failed_sessions(strategy),
                         "train_tool_output_max_chars": _train_tool_output_max_chars(strategy),
                         "memory_constructor_mode": _memory_constructor_mode(config, strategy),
