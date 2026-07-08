@@ -55,6 +55,10 @@ class FakeVikingFS:
         self.files.pop(uri, None)
         return {"estimated_deleted_count": 1}
 
+    def _uri_to_path(self, uri: str, ctx=None):
+        del ctx
+        return f"/fake/agfs/{uri.removeprefix('viking://')}"
+
 
 class FakeVikingDB:
     def __init__(self):
@@ -63,6 +67,36 @@ class FakeVikingDB:
     async def enqueue_embedding_msg(self, embedding_msg):
         self.embedding_messages.append(embedding_msg)
         return True
+
+
+class FakeExactLockContext:
+    calls: list[dict[str, Any]] = []
+
+    def __init__(self, lock_manager, paths, *, lock_mode):
+        del lock_manager
+        self.paths = paths
+        self.lock_mode = lock_mode
+        self.handle = object()
+        self.__class__.calls.append({"paths": paths, "lock_mode": lock_mode})
+
+    async def __aenter__(self):
+        return self.handle
+
+    async def __aexit__(self, exc_type, exc, tb):
+        del exc_type, exc, tb
+        return False
+
+
+def _install_fake_exact_locks(monkeypatch):
+    FakeExactLockContext.calls = []
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_updater.LockContext",
+        FakeExactLockContext,
+    )
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_updater.get_lock_manager",
+        lambda: object(),
+    )
 
 
 def _experience_set() -> ExperienceSet:
@@ -431,6 +465,139 @@ async def test_memory_file_policy_updater_detects_base_content_mismatch():
         "base content mismatch for booking_duplicate_handling: expected gradient before_content"
     ]
     assert policy_set.policies[0].uri not in fs.files
+
+
+@pytest.mark.asyncio
+async def test_memory_file_policy_updater_exact_file_lock_applies_with_trace(monkeypatch):
+    _install_fake_exact_locks(monkeypatch)
+    policy_set = _experience_set()
+    uri = policy_set.policies[0].uri
+    fs = FakeVikingFS(
+        {
+            uri: MemoryFileUtils.write(
+                _memory_file(
+                    name="booking_duplicate_handling",
+                    uri=uri,
+                    content="content",
+                )
+            )
+        }
+    )
+    gradient = _patch_gradient(uri=uri, before="content", after="new content")
+    plan = _plan_from_gradient(gradient)
+
+    result = await MemoryFilePolicyUpdater(viking_fs=fs, exact_file_lock=True).apply(
+        plan,
+        policy_set,
+        fake_request_context(),
+    )
+
+    assert result.errors == []
+    assert result.written_uris == [uri]
+    assert FakeExactLockContext.calls == [
+        {
+            "paths": ["/fake/agfs/user/u/memories/experiences/booking_duplicate_handling.md"],
+            "lock_mode": "exact",
+        }
+    ]
+    assert result.metadata["apply_trace_summary"] == {"applied": 1}
+    assert result.metadata["apply_trace"][0]["uri"] == uri
+    assert result.metadata["apply_trace"][0]["stale_detected"] is False
+
+
+@pytest.mark.asyncio
+async def test_memory_file_policy_updater_exact_file_lock_skips_stale_deleted(monkeypatch):
+    _install_fake_exact_locks(monkeypatch)
+    policy_set = _experience_set()
+    uri = policy_set.policies[0].uri
+    fs = FakeVikingFS({})
+    gradient = _patch_gradient(uri=uri, before="content", after="new content")
+    plan = _plan_from_gradient(gradient)
+
+    result = await MemoryFilePolicyUpdater(viking_fs=fs, exact_file_lock=True).apply(
+        plan,
+        policy_set,
+        fake_request_context(),
+    )
+
+    assert result.errors == []
+    assert result.written_uris == []
+    assert uri not in fs.files
+    assert result.metadata["apply_trace_summary"] == {"skipped_stale_deleted": 1}
+    trace = result.metadata["apply_trace"][0]
+    assert trace["uri"] == uri
+    assert trace["stale_detected"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_file_policy_updater_exact_file_lock_skips_unread_existing(monkeypatch):
+    _install_fake_exact_locks(monkeypatch)
+    root = "viking://user/u/memories/experiences"
+    uri = f"{root}/booking_duplicate_handling.md"
+    policy_set = ExperienceSet(root_uri=root, policies=[])
+    fs = FakeVikingFS(
+        {
+            uri: MemoryFileUtils.write(
+                _memory_file(
+                    name="booking_duplicate_handling",
+                    uri=uri,
+                    content="already created",
+                )
+            )
+        }
+    )
+    gradient = _patch_gradient(uri=uri, before=None, after="new content", base_version=None)
+    plan = _plan_from_gradient(gradient)
+
+    result = await MemoryFilePolicyUpdater(viking_fs=fs, exact_file_lock=True).apply(
+        plan,
+        policy_set,
+        fake_request_context(),
+    )
+
+    assert result.errors == []
+    assert result.written_uris == []
+    assert MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content() == "already created"
+    assert result.metadata["apply_trace_summary"] == {"skipped_stale_unread_existing": 1}
+    trace = result.metadata["apply_trace"][0]
+    assert trace["uri"] == uri
+    assert trace["stale_detected"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_file_policy_updater_exact_file_lock_fails_stale_update(monkeypatch):
+    _install_fake_exact_locks(monkeypatch)
+    policy_set = _experience_set()
+    uri = policy_set.policies[0].uri
+    fs = FakeVikingFS(
+        {
+            uri: MemoryFileUtils.write(
+                _memory_file(
+                    name="booking_duplicate_handling",
+                    uri=uri,
+                    content="concurrent update",
+                )
+            )
+        }
+    )
+    gradient = _patch_gradient(uri=uri, before="content", after="new content")
+    plan = _plan_from_gradient(gradient)
+
+    result = await MemoryFilePolicyUpdater(viking_fs=fs, exact_file_lock=True).apply(
+        plan,
+        policy_set,
+        fake_request_context(),
+    )
+
+    assert result.written_uris == []
+    assert result.errors == [
+        "base content mismatch for booking_duplicate_handling: expected gradient before_content"
+    ]
+    assert MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content() == "concurrent update"
+    assert result.metadata["apply_trace_summary"] == {"failed_base_content_mismatch": 1}
+    trace = result.metadata["apply_trace"][0]
+    assert trace["rewrite_attempted"] is False
+    assert trace["stale_detected"] is True
 
 
 @pytest.mark.asyncio

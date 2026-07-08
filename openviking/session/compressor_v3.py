@@ -598,7 +598,11 @@ class SessionCompressorV3:
                     viking_fs=viking_fs,
                     memory_type="experiences",
                 ),
-                policy_updater=MemoryFilePolicyUpdater(viking_fs=viking_fs, vikingdb=self.vikingdb),
+                policy_updater=MemoryFilePolicyUpdater(
+                    viking_fs=viking_fs,
+                    vikingdb=self.vikingdb,
+                    exact_file_lock=True,
+                ),
                 context=PipelineContext(
                     analysis_context=analysis_context,
                     gradient_context=gradient_context,
