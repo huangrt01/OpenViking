@@ -218,7 +218,9 @@ class MixedLevelChildProxy:
                 "viking://resources/large-file",
                 0.8,
                 level=2,
-                abstract="large file abstract",
+                # L2 abstracts may reach the vector-store byte ceiling.  They
+                # must never be forwarded to a directory reranker.
+                abstract="x" * 50_000,
             ),
         ]
 
@@ -526,7 +528,7 @@ async def test_score_propagation_alpha_uses_configured_weight():
 
 
 @pytest.mark.asyncio
-async def test_recursive_search_reranks_only_directory_levels():
+async def test_recursive_search_keeps_large_l2_abstract_out_of_reranker():
     retriever = HierarchicalRetriever(
         storage=DummyStorage(),
         embedder=None,
