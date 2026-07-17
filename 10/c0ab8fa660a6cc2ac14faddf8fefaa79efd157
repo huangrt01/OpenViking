@@ -1,0 +1,49 @@
+docs/en/concepts/11-multi-tenant.md
+  s_6fe15e66a05bf5::t_b78297b98bd0a9 118,124,126,129-130
+docs/en/migration/01-user-peer-model.md
+  s_6fe15e66a05bf5::t_8e69ee06043fbc 85
+docs/zh/concepts/11-multi-tenant.md
+  s_6fe15e66a05bf5::t_a594dbf0fcec72 120,124,127,130-131
+docs/zh/migration/01-user-peer-model.md
+  s_6fe15e66a05bf5::t_d22ae7e2309905 85
+openviking/server/mcp_endpoint.py
+  s_6fe15e66a05bf5::t_458bbd712ca281 429
+openviking/session/session.py
+  s_2bbda03ebb0cb8::t_57ca8d118eeea9 114-116,118-119
+tests/server/test_actor_peer_retrieval_targets.py
+  s_6fe15e66a05bf5::t_b3c87c42b3824b 49,66,108-116
+tests/server/test_api_sessions.py
+  s_2bbda03ebb0cb8::t_2903e8c0c9eefe 644-665
+tests/server/test_mcp_endpoint.py
+  s_2bbda03ebb0cb8::t_d34c5bca6f89c5 453-454,479-511
+tests/server/test_peer_id_compat.py
+  s_6fe15e66a05bf5::t_c27e909355e946 8,13-14,60-83
+tests/session/test_memory_extraction_scope.py
+  s_6fe15e66a05bf5::t_5321e60357094a 59,67-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "10c0ab8fa660a6cc2ac14faddf8fefaa79efd157",
+  "prompts": {},
+  "sessions": {
+    "s_2bbda03ebb0cb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e83-415f-7260-a3f6-d925f439978c",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    },
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
