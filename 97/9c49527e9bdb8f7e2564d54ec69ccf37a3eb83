@@ -1,0 +1,23 @@
+openviking/server/temp_upload_store.py
+  s_6fe15e66a05bf5::t_9aca95742951ec 310,367-368
+tests/server/test_temp_upload_store_integrity.py
+  s_6fe15e66a05bf5::t_f5e43bdee45eb5 1-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "979c49527e9bdb8f7e2564d54ec69ccf37a3eb83",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
