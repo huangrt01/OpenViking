@@ -1,0 +1,23 @@
+openviking/service/memory_consolidation.py
+  s_6fe15e66a05bf5::t_75734891831be9 1-154
+tests/unit/service/test_memory_consolidation.py
+  s_6fe15e66a05bf5::t_52a5a69a30b232 1-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4062c5d32c0607efe329d5cdba5af81290c2e3f8",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
