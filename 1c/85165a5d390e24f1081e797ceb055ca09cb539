@@ -1,0 +1,27 @@
+openviking/server/app.py
+  s_6fe15e66a05bf5::t_3b8e5cbac7db72 38,526
+openviking/server/routers/memories.py
+  s_6fe15e66a05bf5::t_d8e040d60b03fa 1-40
+openviking/service/core.py
+  s_6fe15e66a05bf5::t_e8c32391ad5a10 20-22,570-589
+tests/unit/service/test_memory_consolidation.py
+  s_6fe15e66a05bf5::t_e9c9b55b2b2b90 1,9,148-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1c85165a5d390e24f1081e797ceb055ca09cb539",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
