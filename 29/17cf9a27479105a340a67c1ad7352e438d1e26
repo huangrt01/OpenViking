@@ -1,0 +1,31 @@
+openviking/parse/registry.py
+  s_6fe15e66a05bf5::t_56fb7b8763999b 14,26,201-210,218-221
+openviking/parse/understanding_api.py
+  s_6fe15e66a05bf5::t_77627e0226a514 171
+openviking/storage/queuefs/semantic_processor.py
+  s_6fe15e66a05bf5::t_6ce5baac9b4d0e 31,1144
+tests/parse/test_directory_parser_routing.py
+  s_6fe15e66a05bf5::t_c6cd2bd68d09ab 88,119,173-182
+tests/parse/test_media_type_routing.py
+  s_6fe15e66a05bf5::t_834ff92464744a 1-17
+tests/parse/test_parser_router.py
+  s_6fe15e66a05bf5::t_c8e9a0504e278c 2,4-6,24-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2917cf9a27479105a340a67c1ad7352e438d1e26",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
