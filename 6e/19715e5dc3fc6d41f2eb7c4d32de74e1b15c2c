@@ -1,0 +1,25 @@
+openviking/session/train/batch_runner.py
+  s_2bbda03ebb0cb8::t_c46b078ec3639b 9,11,51-52,55-59,86,135-136,216-218,259-261,332-334,383,503-504,619,666-667,669-670,679-684,688-690,693-698,701-733,736,1083-1084,1093-1249
+openviking/session/train/run_batch_train_eval.py
+  s_2bbda03ebb0cb8::t_3730c044bac960 46-57,100,103-108,225
+tests/session/train/test_batch_runner_cache.py
+  s_2bbda03ebb0cb8::t_d9b121eba5dda4 6-7,13,93-96,115,122-241,349-360
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6e19715e5dc3fc6d41f2eb7c4d32de74e1b15c2c",
+  "prompts": {},
+  "sessions": {
+    "s_2bbda03ebb0cb8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5e83-415f-7260-a3f6-d925f439978c",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
