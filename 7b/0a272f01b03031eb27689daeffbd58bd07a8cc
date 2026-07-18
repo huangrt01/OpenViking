@@ -1,0 +1,23 @@
+openviking/service/memory_consolidation.py
+  s_6fe15e66a05bf5::t_91c845e736d8f0 23-24,44-45,54-55,74-102,105-111,149-152,155-156,165-169,172-176,181,184-185
+tests/unit/service/test_memory_consolidation.py
+  s_6fe15e66a05bf5::t_75bdefa555161d 1-2,13-21,25,41-42,44-47,63,80-99,119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "7b0a272f01b03031eb27689daeffbd58bd07a8cc",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
