@@ -1,0 +1,25 @@
+openviking/parse/parsers/powerpoint.py
+  s_6fe15e66a05bf5::t_88fb490b2504b2 57-64,66-74,78-81,96-104,108,118-120,144-146,148,151,159-166,177-195
+tests/parse/test_document_parser_threading.py
+  s_6fe15e66a05bf5::t_1946744e541bee 157,167-171,173-174
+tests/parse/test_powerpoint_images.py
+  s_6fe15e66a05bf5::t_c227103437846c 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b6d21860576801cd71ff0e64f4f7f2c2ad643ff7",
+  "prompts": {},
+  "sessions": {
+    "s_6fe15e66a05bf5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4aa1-02af-7ff2-8876-044dd610c7a1",
+        "model": "unknown"
+      },
+      "human_author": "huangruiteng <huangruiteng@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
